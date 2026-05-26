@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Samsmrti</title>
+    <style>
+      .cloze-blank {
+        color: #6366f1;
+        font-weight: 600;
+        background: #eef2ff;
+        padding: 2px 6px;
+        border-radius: 4px;
+      }
+      .cloze-answer {
+        color: #6366f1;
+        font-weight: 700;
+        text-decoration: underline;
+        text-decoration-color: #c7d2fe;
+        text-underline-offset: 3px;
+      }
+      @media (prefers-color-scheme: dark) {
+        .cloze-blank {
+          background: #312e81;
+          color: #a5b4fc;
+        }
+        .cloze-answer {
+          color: #a5b4fc;
+          text-decoration-color: #4338ca;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

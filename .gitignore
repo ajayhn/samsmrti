@@ -1,0 +1,50 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Local / import data (not source)
+data/
+
+# Rust build artifacts
+src-tauri/target/
+
+# App runtime data & backups
+*.db
+*.db-*
+*.samsmrti-backup
+media/
+
+# Large / binary import formats (use data/ locally)
+*.apkg
+*.mochi
+
+# Tauri generated (regenerated on build)
+src-tauri/gen/
+
+# Unused Vite template assets (icons in src-tauri/icons/ are committed)
+src/assets/*.png
+
+# Environment
+.env
+.env.*
