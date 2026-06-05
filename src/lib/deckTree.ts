@@ -70,3 +70,32 @@ export function deckMatchesQuery(deck: DeckWithCounts, query: string): boolean {
   if (!q) return false;
   return deck.name.toLowerCase().includes(q);
 }
+
+export interface FlatDeckOption {
+  id: string;
+  name: string;
+  depth: number;
+}
+
+/** Deck tree order for pickers (parents before children). */
+export function flattenDecksForPicker(decks: DeckWithCounts[]): FlatDeckOption[] {
+  const byParent = new Map<string | null, DeckWithCounts[]>();
+  for (const deck of decks) {
+    const key = deck.parent_id;
+    if (!byParent.has(key)) byParent.set(key, []);
+    byParent.get(key)!.push(deck);
+  }
+  for (const group of byParent.values()) {
+    group.sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  const out: FlatDeckOption[] = [];
+  const walk = (parentId: string | null, depth: number) => {
+    for (const deck of byParent.get(parentId) ?? []) {
+      out.push({ id: deck.id, name: deck.name, depth });
+      walk(deck.id, depth + 1);
+    }
+  };
+  walk(null, 0);
+  return out;
+}

@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
+import { filterInputProps } from "../../lib/filterInput";
 import { api, type Entity, type MindMapData, type MindMapNode } from "../../lib/tauri";
 import { useDeckStore } from "../../stores/deckStore";
 import { isNativeEditShortcut } from "../../lib/keyboard";
@@ -215,10 +216,13 @@ export function EntityGraph() {
         <div className="w-64 border-r border-border bg-surface-alt flex flex-col shrink-0">
           <div className="p-3 space-y-2 border-b border-border">
             <input
+              type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               placeholder="Search entities..."
               className="w-full px-3 py-2 bg-surface border border-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary-500"
+              name="samsmrti-entity-search"
+              {...filterInputProps}
             />
             {entityTypes.length > 0 && (
               <select
@@ -279,6 +283,7 @@ export function EntityGraph() {
             {showNewEntity ? (
               <div className="space-y-2">
                 <input
+                  type="text"
                   value={newEntityName}
                   onChange={(e) => setNewEntityName(e.target.value)}
                   placeholder="Entity name"
@@ -288,8 +293,10 @@ export function EntityGraph() {
                     if (e.key === "Enter") handleCreateEntity();
                     if (e.key === "Escape") setShowNewEntity(false);
                   }}
+                  {...filterInputProps}
                 />
                 <input
+                  type="text"
                   value={newEntityType}
                   onChange={(e) => setNewEntityType(e.target.value)}
                   placeholder="Type (optional)"
@@ -298,6 +305,7 @@ export function EntityGraph() {
                     if (e.key === "Enter") handleCreateEntity();
                     if (e.key === "Escape") setShowNewEntity(false);
                   }}
+                  {...filterInputProps}
                 />
                 <div className="flex gap-2">
                   <button
@@ -380,6 +388,7 @@ export function EntityGraph() {
               <div>
                 <label className="block text-xs font-medium text-text-secondary mb-1">Name</label>
                 <input
+                  type="text"
                   value={editName}
                   onChange={(e) => setEditName(e.target.value)}
                   className="w-full px-3 py-2 bg-surface-alt border border-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary-500"
@@ -388,11 +397,13 @@ export function EntityGraph() {
                     if (e.key === "Enter") handleSaveEntity();
                     if (e.key === "Escape") setEditingEntity(null);
                   }}
+                  {...filterInputProps}
                 />
               </div>
               <div>
                 <label className="block text-xs font-medium text-text-secondary mb-1">Type</label>
                 <input
+                  type="text"
                   value={editType}
                   onChange={(e) => setEditType(e.target.value)}
                   placeholder="e.g. Country, River, Person..."
@@ -401,6 +412,7 @@ export function EntityGraph() {
                     if (e.key === "Enter") handleSaveEntity();
                     if (e.key === "Escape") setEditingEntity(null);
                   }}
+                  {...filterInputProps}
                 />
               </div>
               <div>

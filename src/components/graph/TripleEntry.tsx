@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from "react";
+import { filterInputProps } from "../../lib/filterInput";
 import { api, type Entity, type RelationType } from "../../lib/tauri";
 
 interface Props {
@@ -259,6 +260,7 @@ export function TripleEntry({ onTripleCreated, focusedEntityId }: Props) {
           onBlur={() => setTimeout(() => subject.setOpen(false), 200)}
           placeholder="Subject entity..."
           className="w-full px-3 py-2 bg-surface border border-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary-500"
+          {...filterInputProps}
         />
         {subject.open && (
           <div className="absolute bottom-full mb-1 left-0 right-0 bg-surface border border-border rounded-lg shadow-lg max-h-48 overflow-y-auto z-50">
@@ -288,6 +290,7 @@ export function TripleEntry({ onTripleCreated, focusedEntityId }: Props) {
           onBlur={() => setTimeout(() => relation.setOpen(false), 200)}
           placeholder="Relation..."
           className="w-full px-3 py-2 bg-surface border border-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary-500"
+          {...filterInputProps}
         />
         {relation.open && (
           <div className="absolute bottom-full mb-1 left-0 right-0 bg-surface border border-border rounded-lg shadow-lg max-h-48 overflow-y-auto z-50">
@@ -332,6 +335,7 @@ export function TripleEntry({ onTripleCreated, focusedEntityId }: Props) {
             onBlur={() => setTimeout(() => objectAc.setOpen(false), 200)}
             placeholder={objects.length > 0 ? "Add more..." : "Object entities..."}
             className="flex-1 min-w-[100px] py-0.5 bg-transparent text-sm focus:outline-none"
+            {...filterInputProps}
           />
         </div>
         {objectAc.open && (

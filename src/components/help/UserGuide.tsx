@@ -21,8 +21,9 @@ Samsmrti comes with four example decks (Science, Math, History, Geography) to ge
 **Two modes** (also in **Settings → Data** and the **File** menu):
 
 **1. Content (JSON)** — share decks; recipient starts fresh
-- **Export Content** → \`samsmrti-content-YYYY-MM-DD.json\`
-- **Import Content** → merges new IDs; imported cards are **new** for every profile
+- **Export Content** → pick decks (default: all), then save \`samsmrti-content-YYYY-MM-DD.json\`
+- **Import Content** → choose file, pick decks from that file (default: all), then merge
+- Selecting a deck includes its **subdecks** automatically
 - Includes: decks, note types, notes, cards, tags, knowledge graph
 - Excludes: review log, per-profile scheduling, profiles, karma, media binaries (copy the app **media** folder separately if needed)
 
@@ -194,7 +195,11 @@ Use stats to monitor your progress and identify areas that need more practice.
 | Rate Hard | 2 |
 | Rate Good | 3 |
 | Rate Easy | 4 |
-| Undo last rating | Ctrl/Cmd + Z |
+| Flag note (add \`flag\` tag) | F |
+| Bury card | 9 |
+| Delete card | D |
+| Edit note | E |
+| Undo last rating | U or Ctrl/Cmd + Z |
 | End session | Escape |
 | Insert cloze | Ctrl/Cmd + Shift + C |
 `,

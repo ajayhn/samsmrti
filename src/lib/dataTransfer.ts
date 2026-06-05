@@ -1,8 +1,9 @@
 import { confirm, message, open, save } from "@tauri-apps/plugin-dialog";
-import { api } from "./tauri";
+import { api, type ContentDeckOption } from "./tauri";
 import { useDeckStore } from "../stores/deckStore";
 import { useKarmaStore } from "../stores/karmaStore";
 import { useProfileStore } from "../stores/profileStore";
+import { pickDecks } from "../stores/contentTransferStore";
 
 async function refreshAfterDataChange() {
   await useDeckStore.getState().fetchDecks();
@@ -10,7 +11,27 @@ async function refreshAfterDataChange() {
   await useKarmaStore.getState().fetchKarma();
 }
 
+function deckIdsArg(
+  selected: string[],
+  all: ContentDeckOption[]
+): string[] | undefined {
+  if (all.length === 0) return undefined;
+  if (selected.length >= all.length) return undefined;
+  return selected;
+}
+
 export async function exportContentJson(): Promise<void> {
+  let decks: ContentDeckOption[];
+  try {
+    decks = await api.listContentExportDecks();
+  } catch (e) {
+    await message(`Could not load decks: ${e}`, { title: "Export failed", kind: "error" });
+    return;
+  }
+
+  const selected = await pickDecks("export", decks);
+  if (!selected) return;
+
   const timestamp = new Date().toISOString().slice(0, 10);
   const filePath = await save({
     defaultPath: `samsmrti-content-${timestamp}.json`,
@@ -19,9 +40,13 @@ export async function exportContentJson(): Promise<void> {
   if (!filePath) return;
 
   try {
-    const result = await api.exportContentJson(filePath);
+    const result = await api.exportContentJson(filePath, deckIdsArg(selected, decks));
+    const scope =
+      selected.length < decks.length
+        ? ` (${selected.length} of ${decks.length} decks)`
+        : "";
     await message(
-      `Exported ${result.decks} decks, ${result.notes} notes, ${result.cards} cards, ${result.entities} entities, and ${result.triples} triples.\n\nStudy history, profiles, and karma were not included. Import this on another machine so each user starts with fresh scheduling.`,
+      `Exported${scope}: ${result.decks} decks, ${result.notes} notes, ${result.cards} cards, ${result.entities} entities, and ${result.triples} triples.\n\nStudy history, profiles, and karma were not included.`,
       { title: "Content export complete", kind: "info" }
     );
   } catch (e) {
@@ -30,12 +55,6 @@ export async function exportContentJson(): Promise<void> {
 }
 
 export async function importContentJson(): Promise<void> {
-  const ok = await confirm(
-    "Import content from a JSON file?\n\nExisting rows with the same IDs are kept; only new decks, notes, cards, and graph data are added. All imported cards start as \"new\" for every profile.",
-    { title: "Import content", kind: "warning" }
-  );
-  if (!ok) return;
-
   const filePath = await open({
     multiple: false,
     filters: [
@@ -44,15 +63,37 @@ export async function importContentJson(): Promise<void> {
   });
   if (!filePath || Array.isArray(filePath)) return;
 
+  let decks: ContentDeckOption[];
   try {
-    const result = await api.importContentJson(filePath);
+    decks = await api.previewContentImport(filePath);
+  } catch (e) {
+    await message(`Could not read file: ${e}`, { title: "Import failed", kind: "error" });
+    return;
+  }
+
+  if (decks.length === 0) {
+    await message("No decks found in this file.", { title: "Import content", kind: "info" });
+    return;
+  }
+
+  const selected = await pickDecks("import", decks, filePath);
+  if (!selected) return;
+
+  const ok = await confirm(
+    `Import ${selected.length === decks.length ? "all decks" : `${selected.length} deck(s)`} from the file?\n\nExisting rows with the same IDs are kept; only new content is added. All imported cards start as \"new\" for every profile.`,
+    { title: "Import content", kind: "warning" }
+  );
+  if (!ok) return;
+
+  try {
+    const result = await api.importContentJson(filePath, deckIdsArg(selected, decks));
     await refreshAfterDataChange();
     const warn =
       result.warnings.length > 0
         ? `\n\nWarnings:\n${result.warnings.slice(0, 5).join("\n")}`
         : "";
     await message(
-      `Added ${result.decks_added} decks, ${result.notes_added} notes, ${result.cards_added} cards, ${result.entities_added} entities, ${result.triples_added} triples. Skipped ${result.rows_skipped} existing rows.${warn}`,
+      `Added ${result.decks_added} decks, ${result.notes_added} notes, ${result.cards_added} cards, ${result.entities_added} entities, and ${result.triples_added} triples. Skipped ${result.rows_skipped} existing rows.${warn}`,
       { title: "Content import complete", kind: "info" }
     );
   } catch (e) {

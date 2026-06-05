@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
+import { filterInputProps } from "../../lib/filterInput";
 import { api, type BuriedCard } from "../../lib/tauri";
 import { useDeckStore } from "../../stores/deckStore";
 import { renderTemplate } from "../../lib/cloze";
@@ -74,6 +75,8 @@ export function BuriedCardsPanel() {
           onChange={(e) => setQuery(e.target.value)}
           placeholder="Search buried cards..."
           className="flex-1 px-4 py-2.5 bg-surface-alt border border-border rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary-500"
+          name="samsmrti-buried-search"
+          {...filterInputProps}
         />
         <select
           value={selectedDeck}

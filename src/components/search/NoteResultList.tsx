@@ -1,4 +1,5 @@
 import type { NoteType } from "../../lib/tauri";
+import { NoteTagsPanel } from "../notes/NoteTagsPanel";
 import { StudyCardPreview } from "./StudyCardPreview";
 
 export interface NoteSearchResult {
@@ -41,25 +42,52 @@ export function NoteResultList({
   emptyMessage,
   expanded,
   setExpanded,
+  selectedNoteId,
+  onSelectNote,
   noteTypes,
   showDeckName = true,
   compact = false,
   onDeleteNote,
   onBuryNote,
+  onToggleFlagNote,
+  onNoteFlagStateChange,
+  onTagsUpdated,
+  onNoteUpdated,
+  noteFlagHints,
   busyNoteId,
+  bookmarkNoteId,
+  onSetBookmark,
 }: {
   results: NoteSearchResult[];
   loading: boolean;
   emptyMessage: string;
-  expanded: string | null;
-  setExpanded: (id: string | null) => void;
+  /** Inline expand mode (browser, etc.). */
+  expanded?: string | null;
+  setExpanded?: (id: string | null) => void;
+  /** Master-detail mode: select a row; preview lives elsewhere. */
+  selectedNoteId?: string | null;
+  onSelectNote?: (id: string | null) => void;
   noteTypes: NoteType[];
   showDeckName?: boolean;
   compact?: boolean;
   onDeleteNote?: (noteId: string) => void | Promise<void>;
   onBuryNote?: (noteId: string) => void | Promise<void>;
+  onToggleFlagNote?: (noteId: string) => void | Promise<void>;
+  onNoteFlagStateChange?: (noteId: string, anyFlagged: boolean) => void;
+  onTagsUpdated?: (noteId: string, tags: string[]) => void;
+  onNoteUpdated?: (
+    noteId: string,
+    fields: Record<string, string>,
+    tags: string[]
+  ) => void;
+  /** Per-note: true if any study card is flagged (drives row Flag/Unflag label). */
+  noteFlagHints?: Record<string, boolean>;
   busyNoteId?: string | null;
+  /** Resume bookmark: one starred note per deck list (browse / View Cards). */
+  bookmarkNoteId?: string | null;
+  onSetBookmark?: (noteId: string | null) => void;
 }) {
+  const selectionMode = onSelectNote != null;
   if (loading) {
     return (
       <div className="text-center text-text-muted text-sm py-4">Loading...</div>
@@ -72,12 +100,17 @@ export function NoteResultList({
     );
   }
 
-  const showActions = Boolean(onDeleteNote || onBuryNote);
+  const showActions = Boolean(onDeleteNote || onBuryNote || onToggleFlagNote);
 
   return (
     <div className={compact ? "space-y-0.5" : "space-y-2"}>
       {results.map((r) => {
         const isBusy = busyNoteId === r.note_id;
+        const isActive = selectionMode
+          ? selectedNoteId === r.note_id
+          : expanded === r.note_id;
+        const anyFlagged = Boolean(noteFlagHints?.[r.note_id]);
+        const isBookmark = bookmarkNoteId === r.note_id;
         const summary = compact
           ? notePreviewOneLine(r.fields_json)
           : notePreviewText(r.fields_json);
@@ -85,19 +118,66 @@ export function NoteResultList({
         return (
           <div
             key={r.note_id}
-            className={`bg-surface-alt border border-border overflow-hidden ${
+            data-note-id={r.note_id}
+            className={`border overflow-hidden ${
               compact ? "rounded-lg" : "rounded-xl"
+            } ${
+              isActive
+                ? "bg-primary-50 border-primary-300 dark:bg-primary-900/20 dark:border-primary-700"
+                : isBookmark
+                  ? "bg-amber-50/80 border-amber-200 dark:bg-amber-900/15 dark:border-amber-800/60"
+                  : "bg-surface-alt border-border"
             }`}
           >
             <div className={`flex items-center gap-2 ${compact ? "min-h-9" : ""}`}>
+              {onSetBookmark && (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onSetBookmark(isBookmark ? null : r.note_id);
+                  }}
+                  className={`shrink-0 p-1.5 rounded-md transition-colors cursor-pointer ${
+                    compact ? "ml-1" : "ml-2"
+                  } ${
+                    isBookmark
+                      ? "text-amber-500 hover:text-amber-600"
+                      : "text-text-muted/50 hover:text-amber-500"
+                  }`}
+                  title={
+                    isBookmark
+                      ? "Clear resume bookmark"
+                      : "Set resume bookmark (start here next time)"
+                  }
+                  aria-label={
+                    isBookmark ? "Clear resume bookmark" : "Set resume bookmark"
+                  }
+                >
+                  <svg
+                    className="w-4 h-4"
+                    viewBox="0 0 20 20"
+                    fill={isBookmark ? "currentColor" : "none"}
+                    stroke="currentColor"
+                    strokeWidth={isBookmark ? 0 : 1.5}
+                    aria-hidden
+                  >
+                    <path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z" />
+                  </svg>
+                </button>
+              )}
               <button
                 type="button"
-                onClick={() =>
-                  setExpanded(expanded === r.note_id ? null : r.note_id)
-                }
-                className={`flex-1 min-w-0 text-left hover:bg-surface-hover transition-colors cursor-pointer ${
+                data-note-row-select
+                onClick={() => {
+                  if (selectionMode) {
+                    onSelectNote(isActive ? null : r.note_id);
+                  } else if (setExpanded) {
+                    setExpanded(expanded === r.note_id ? null : r.note_id);
+                  }
+                }}
+                className={`flex-1 min-w-0 text-left transition-colors cursor-pointer ${
                   compact ? "px-3 py-2 flex items-center" : "px-4 py-3"
-                }`}
+                } ${isActive ? "" : "hover:bg-surface-hover"}`}
               >
                 {compact ? (
                   <span className="text-sm text-text truncate">{summary}</span>
@@ -138,6 +218,30 @@ export function NoteResultList({
                     compact ? "pr-2" : "flex-col gap-1.5 p-3"
                   }`}
                 >
+                  {onToggleFlagNote && (
+                    <button
+                      type="button"
+                      disabled={isBusy}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        void onToggleFlagNote(r.note_id);
+                      }}
+                      title={
+                        anyFlagged
+                          ? "Remove flag from all cards for this note"
+                          : "Flag all cards for this note"
+                      }
+                      className={`text-xs border rounded-md transition-colors cursor-pointer disabled:opacity-50 ${
+                        compact ? "px-2 py-0.5" : "px-2.5 py-1 rounded-lg"
+                      } ${
+                        anyFlagged
+                          ? "text-amber-800 dark:text-amber-200 border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-900/20 hover:bg-amber-100 dark:hover:bg-amber-900/30"
+                          : "text-text-secondary border-border hover:bg-surface-hover"
+                      }`}
+                    >
+                      {anyFlagged ? "Unflag" : "Flag"}
+                    </button>
+                  )}
                   {onBuryNote && (
                     <button
                       type="button"
@@ -176,25 +280,31 @@ export function NoteResultList({
               )}
             </div>
 
-            {expanded === r.note_id && (
+            {!selectionMode && expanded === r.note_id && setExpanded && (
               <div className="px-4 py-3 border-t border-border bg-surface space-y-4">
-                {r.tags.length > 0 && (
-                  <div className="flex flex-wrap gap-1">
-                    {r.tags.map((t) => (
-                      <span
-                        key={t}
-                        className="text-xs px-2 py-0.5 bg-primary-100 text-primary-700 dark:bg-primary-900/30 dark:text-primary-300 rounded-full"
-                      >
-                        {t}
-                      </span>
-                    ))}
-                  </div>
-                )}
+                <NoteTagsPanel
+                  noteId={r.note_id}
+                  onTagsUpdated={
+                    onTagsUpdated
+                      ? (tags) => onTagsUpdated(r.note_id, tags)
+                      : undefined
+                  }
+                />
                 <StudyCardPreview
                   noteId={r.note_id}
                   noteTypeId={r.note_type_id}
                   fields={r.fields_json}
                   noteTypes={noteTypes}
+                  onFlagStateChange={
+                    onNoteFlagStateChange
+                      ? (anyFlagged) => onNoteFlagStateChange(r.note_id, anyFlagged)
+                      : undefined
+                  }
+                  onNoteUpdated={
+                    onNoteUpdated
+                      ? (fields, tags) => onNoteUpdated(r.note_id, fields, tags)
+                      : undefined
+                  }
                 />
                 <details className="group">
                   <summary className="text-xs font-medium text-text-muted cursor-pointer hover:text-text-secondary">

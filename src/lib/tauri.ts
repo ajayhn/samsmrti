@@ -1,5 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
 
+export interface ContentDeckOption {
+  id: string;
+  name: string;
+  parent_id: string | null;
+  note_count: number;
+}
+
 export interface Deck {
   id: string;
   name: string;
@@ -15,6 +22,12 @@ export interface DeckWithCounts extends Deck {
   total_cards: number;
   due_cards: number;
   new_cards: number;
+}
+
+/** Payload returned when deleting a deck; pass to restoreDeletedDeck to undo. */
+export interface DeletedDeckSnapshot {
+  root_deck_id: string;
+  data: Record<string, unknown>;
 }
 
 export interface NoteType {
@@ -277,9 +290,16 @@ export const api = {
     max_reviews?: number;
   }) => invoke<Deck>("update_deck", { input }),
 
-  deleteDeck: (id: string) => invoke<void>("delete_deck", { id }),
+  deleteDeck: (id: string) =>
+    invoke<DeletedDeckSnapshot>("delete_deck", { id }),
+
+  restoreDeletedDeck: (snapshot: DeletedDeckSnapshot) =>
+    invoke<void>("restore_deleted_deck", { snapshot }),
 
   getNoteTypes: () => invoke<NoteType[]>("get_note_types"),
+
+  getDeckPrimaryNoteType: (deckId: string) =>
+    invoke<string | null>("get_deck_primary_note_type", { deckId }),
 
   createNote: (input: {
     deck_id: string;
@@ -291,6 +311,9 @@ export const api = {
   getNotes: (deckId: string) => invoke<Note[]>("get_notes", { deckId }),
 
   getNoteTags: (noteId: string) => invoke<string[]>("get_note_tags", { noteId }),
+  getCardFlag: (cardId: string) => invoke<boolean>("get_card_flag", { cardId }),
+  setCardFlag: (cardId: string, flagged: boolean) =>
+    invoke<boolean>("set_card_flag", { cardId, flagged }),
 
   updateNote: (input: {
     id: string;
@@ -491,7 +514,13 @@ export const api = {
       triples: number;
     }>("export_all_gz", { filePath }),
 
-  exportContentJson: (filePath: string) =>
+  listContentExportDecks: () =>
+    invoke<ContentDeckOption[]>("list_content_export_decks"),
+
+  previewContentImport: (filePath: string) =>
+    invoke<ContentDeckOption[]>("preview_content_import", { filePath }),
+
+  exportContentJson: (filePath: string, deckIds?: string[]) =>
     invoke<{
       path: string;
       decks: number;
@@ -499,9 +528,9 @@ export const api = {
       cards: number;
       entities: number;
       triples: number;
-    }>("export_content_json", { filePath }),
+    }>("export_content_json", { filePath, deckIds: deckIds ?? null }),
 
-  importContentJson: (filePath: string) =>
+  importContentJson: (filePath: string, deckIds?: string[]) =>
     invoke<{
       decks_added: number;
       notes_added: number;
@@ -510,7 +539,7 @@ export const api = {
       triples_added: number;
       rows_skipped: number;
       warnings: string[];
-    }>("import_content_json", { filePath }),
+    }>("import_content_json", { filePath, deckIds: deckIds ?? null }),
 
   exportFullBackup: (filePath: string) =>
     invoke<{

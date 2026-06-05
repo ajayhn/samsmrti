@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import { useDeckStore } from "../../stores/deckStore";
+import { filterInputProps } from "../../lib/filterInput";
 import { isNativeEditShortcut } from "../../lib/keyboard";
 import { DeckSettings } from "./DeckSettings";
 
@@ -145,6 +146,8 @@ export function DeckHome() {
               placeholder={createParentId ? "Subdeck name..." : "Deck name..."}
               autoFocus
               className="flex-1 px-4 py-2.5 bg-surface border border-border rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent"
+              name="samsmrti-new-deck-name"
+              {...filterInputProps}
             />
             <button
               onClick={handleCreate}
@@ -300,6 +303,8 @@ export function DeckHome() {
             }}
             placeholder="Subdeck name..."
             autoFocus
+            name="samsmrti-new-subdeck-name"
+            {...filterInputProps}
             className="flex-1 px-4 py-2.5 bg-surface-alt border border-border rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary-500"
           />
           <button

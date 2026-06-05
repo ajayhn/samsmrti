@@ -1,9 +1,9 @@
 use crate::commands::profiles::ActiveProfile;
+use crate::commands::window_profiles::WindowProfiles;
 use crate::db::Database;
 use rusqlite::{Connection, OptionalExtension};
 use serde::Serialize;
-use std::sync::Mutex;
-use tauri::State;
+use tauri::{State, WebviewWindow};
 
 pub const REVIEW_CENTS_FULL: i64 = 10;
 pub const REVIEW_CENTS_MID: i64 = 5;
@@ -456,27 +456,29 @@ pub fn build_overview_conn(conn: &Connection, active: &ActiveProfile) -> Result<
 #[tauri::command]
 pub fn get_karma_overview(
     db: State<Database>,
-    active: State<'_, Mutex<ActiveProfile>>,
+    window: WebviewWindow,
+    profiles: State<'_, WindowProfiles>,
 ) -> Result<KarmaOverview, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let active_guard = active.lock().map_err(|e| e.to_string())?;
-    build_overview_conn(&conn, &active_guard)
+    let active = profiles.for_window(&window)?;
+    build_overview_conn(&conn, &active)
 }
 
 #[tauri::command]
 pub fn record_activity(
     db: State<Database>,
-    active: State<'_, Mutex<ActiveProfile>>,
+    window: WebviewWindow,
+    profiles: State<'_, WindowProfiles>,
     seconds: i64,
 ) -> Result<KarmaOverview, String> {
-    let active_guard = active.lock().map_err(|e| e.to_string())?;
-    if active_guard.is_admin || seconds <= 0 {
+    let active = profiles.for_window(&window)?;
+    if active.is_admin || seconds <= 0 {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        return build_overview_conn(&conn, &active_guard);
+        return build_overview_conn(&conn, &active);
     }
 
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let profile_id = active_guard.id.clone();
+    let profile_id = active.id.clone();
     let day = today_utc();
     ensure_karma_state(&conn, &profile_id)?;
     get_or_create_daily(&conn, &profile_id, &day)?;
@@ -499,7 +501,7 @@ pub fn record_activity(
         add_count,
     )?;
 
-    build_overview_conn(&conn, &active_guard)
+    build_overview_conn(&conn, &active)
 }
 
 #[cfg(test)]

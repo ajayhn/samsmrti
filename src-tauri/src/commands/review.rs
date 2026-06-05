@@ -1,10 +1,9 @@
 use crate::commands::karma::{self, KarmaEarnEvent};
-use crate::commands::profiles::ActiveProfile;
+use crate::commands::window_profiles::WindowProfiles;
 use crate::db::deck_tree::deck_scope_ids;
 use crate::db::Database;
 use serde::{Deserialize, Serialize};
-use std::sync::Mutex;
-use tauri::State;
+use tauri::{State, WebviewWindow};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ReviewCard {
@@ -117,16 +116,17 @@ pub struct IntervalPreview {
 #[tauri::command]
 pub fn get_interval_preview(
     db: State<Database>,
-    active: State<'_, Mutex<ActiveProfile>>,
+    window: WebviewWindow,
+    profiles: State<'_, WindowProfiles>,
     card_id: String,
 ) -> Result<IntervalPreview, String> {
-    let active_guard = active.lock().map_err(|e| e.to_string())?;
+    let active = profiles.for_window(&window)?;
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
 
     let (state, difficulty, stability): (String, f64, f64) = conn
         .query_row(
             "SELECT state, difficulty, stability FROM card_progress WHERE profile_id = ?1 AND card_id = ?2",
-            (&active_guard.id, &card_id),
+            (&active.id, &card_id),
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .map_err(|e| e.to_string())?;
@@ -142,11 +142,12 @@ pub fn get_interval_preview(
 #[tauri::command]
 pub fn get_review_queue(
     db: State<Database>,
-    active: State<'_, Mutex<ActiveProfile>>,
+    window: WebviewWindow,
+    profiles: State<'_, WindowProfiles>,
     deck_id: String,
 ) -> Result<Vec<ReviewCard>, String> {
-    let active_guard = active.lock().map_err(|e| e.to_string())?;
-    let profile_id = active_guard.id.clone();
+    let active = profiles.for_window(&window)?;
+    let profile_id = active.id.clone();
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let now = chrono::Utc::now().timestamp();
 
@@ -242,14 +243,15 @@ pub fn get_review_queue(
 #[tauri::command]
 pub fn answer_card(
     db: State<Database>,
-    active: State<'_, Mutex<ActiveProfile>>,
+    window: WebviewWindow,
+    profiles: State<'_, WindowProfiles>,
     input: AnswerInput,
 ) -> Result<AnswerResult, String> {
-    let active_guard = active.lock().map_err(|e| e.to_string())?;
+    let active = profiles.for_window(&window)?;
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let now = chrono::Utc::now().timestamp();
 
-    let profile_id = active_guard.id.clone();
+    let profile_id = active.id.clone();
 
     let (state, difficulty, stability): (String, f64, f64) = conn
         .query_row(
@@ -309,7 +311,7 @@ pub fn answer_card(
     )
     .map_err(|e| e.to_string())?;
 
-    let karma = karma::earn_review_conn(&conn, &active_guard, input.elapsed_ms)?;
+    let karma = karma::earn_review_conn(&conn, &active, input.elapsed_ms)?;
 
     Ok(AnswerResult {
         card_id: input.card_id,
@@ -330,13 +332,14 @@ pub struct UndoReviewResult {
 #[tauri::command]
 pub fn undo_review(
     db: State<Database>,
-    active: State<'_, Mutex<ActiveProfile>>,
+    window: WebviewWindow,
+    profiles: State<'_, WindowProfiles>,
     review_log_id: String,
 ) -> Result<UndoReviewResult, String> {
-    let active_guard = active.lock().map_err(|e| e.to_string())?;
+    let active = profiles.for_window(&window)?;
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
 
-    let profile_id = active_guard.id.clone();
+    let profile_id = active.id.clone();
 
     let (card_id, rating, state_before): (String, i32, String) = conn
         .query_row(
@@ -374,7 +377,7 @@ pub fn undo_review(
     conn.execute("DELETE FROM review_log WHERE id = ?1", [&review_log_id])
         .map_err(|e| e.to_string())?;
 
-    let karma = karma::revert_review_conn(&conn, &active_guard)?;
+    let karma = karma::revert_review_conn(&conn, &active)?;
 
     Ok(UndoReviewResult { karma })
 }
@@ -382,11 +385,12 @@ pub fn undo_review(
 #[tauri::command]
 pub fn get_review_stats(
     db: State<Database>,
-    active: State<'_, Mutex<ActiveProfile>>,
+    window: WebviewWindow,
+    profiles: State<'_, WindowProfiles>,
     deck_id: String,
 ) -> Result<ReviewStats, String> {
-    let active_guard = active.lock().map_err(|e| e.to_string())?;
-    let profile_id = active_guard.id.clone();
+    let active = profiles.for_window(&window)?;
+    let profile_id = active.id.clone();
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let now = chrono::Utc::now().timestamp();
     let today_start = now - (now % 86400);
@@ -469,10 +473,11 @@ pub struct BuriedCard {
 #[tauri::command]
 pub fn bury_card(
     db: State<Database>,
-    active: State<'_, Mutex<ActiveProfile>>,
+    window: WebviewWindow,
+    profiles: State<'_, WindowProfiles>,
     card_id: String,
 ) -> Result<i64, String> {
-    let active_guard = active.lock().map_err(|e| e.to_string())?;
+    let active = profiles.for_window(&window)?;
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let now = chrono::Utc::now().timestamp();
     let buried_until = end_of_today(now);
@@ -480,7 +485,7 @@ pub fn bury_card(
     let updated = conn
         .execute(
             "UPDATE card_progress SET buried_until = ?1 WHERE profile_id = ?2 AND card_id = ?3",
-            (buried_until, &active_guard.id, &card_id),
+            (buried_until, &active.id, &card_id),
         )
         .map_err(|e| e.to_string())?;
 
@@ -494,14 +499,15 @@ pub fn bury_card(
 #[tauri::command]
 pub fn unbury_card(
     db: State<Database>,
-    active: State<'_, Mutex<ActiveProfile>>,
+    window: WebviewWindow,
+    profiles: State<'_, WindowProfiles>,
     card_id: String,
 ) -> Result<(), String> {
-    let active_guard = active.lock().map_err(|e| e.to_string())?;
+    let active = profiles.for_window(&window)?;
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     conn.execute(
         "UPDATE card_progress SET buried_until = NULL WHERE profile_id = ?1 AND card_id = ?2",
-        (&active_guard.id, &card_id),
+        (&active.id, &card_id),
     )
     .map_err(|e| e.to_string())?;
     Ok(())
@@ -510,13 +516,14 @@ pub fn unbury_card(
 #[tauri::command]
 pub fn get_buried_cards(
     db: State<Database>,
-    active: State<'_, Mutex<ActiveProfile>>,
+    window: WebviewWindow,
+    profiles: State<'_, WindowProfiles>,
     query: Option<String>,
     deck_id: Option<String>,
     limit: Option<i64>,
 ) -> Result<Vec<BuriedCard>, String> {
-    let active_guard = active.lock().map_err(|e| e.to_string())?;
-    let profile_id = active_guard.id.clone();
+    let active = profiles.for_window(&window)?;
+    let profile_id = active.id.clone();
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let now = chrono::Utc::now().timestamp();
     let fetch_limit = limit.unwrap_or(100).min(500);
@@ -627,10 +634,11 @@ pub struct DeletedCardSnapshot {
 #[tauri::command]
 pub fn delete_card(
     db: State<Database>,
-    active: State<'_, Mutex<ActiveProfile>>,
+    window: WebviewWindow,
+    profiles: State<'_, WindowProfiles>,
     card_id: String,
 ) -> Result<DeletedCardSnapshot, String> {
-    let active_guard = active.lock().map_err(|e| e.to_string())?;
+    let active = profiles.for_window(&window)?;
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
 
     let mut snapshot: DeletedCardSnapshot = conn
@@ -639,7 +647,7 @@ pub fn delete_card(
              FROM cards c
              JOIN card_progress cp ON cp.card_id = c.id AND cp.profile_id = ?2
              WHERE c.id = ?1",
-            (&card_id, &active_guard.id),
+            (&card_id, &active.id),
             |row| {
                 Ok(DeletedCardSnapshot {
                     id: row.get(0)?,

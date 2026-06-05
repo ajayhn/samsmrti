@@ -1,8 +1,12 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
 import { useSearchParams, useNavigate } from "react-router-dom";
+import { filterInputProps } from "../../lib/filterInput";
+import { flattenDecksForPicker } from "../../lib/deckTree";
 import { api, type NoteType } from "../../lib/tauri";
 import { useDeckStore } from "../../stores/deckStore";
+import { useTagListStore } from "../../stores/tagListStore";
 import { BuriedCardsPanel } from "./BuriedCardsPanel";
+import { SearchableFilterCombobox } from "./SearchableFilterCombobox";
 import {
   NoteResultList,
   type NoteSearchResult,
@@ -27,9 +31,13 @@ export function CardBrowser() {
   const [expanded, setExpanded] = useState<string | null>(null);
   const [noteTypes, setNoteTypes] = useState<NoteType[]>([]);
   const { decks } = useDeckStore();
+  const tagListRevision = useTagListStore((s) => s.revision);
 
   useEffect(() => {
     api.getAllTags().then(setTags).catch(() => {});
+  }, [tagListRevision]);
+
+  useEffect(() => {
     api.getNoteTypes().then(setNoteTypes).catch(() => {});
     setIndexing(true);
     api
@@ -75,13 +83,16 @@ export function CardBrowser() {
 
   useEffect(() => {
     if (tab !== "search" && tab !== "tags") return;
+    const hasFilters =
+      query.trim() || selectedDeck || selectedTag || selectedNoteTypeId;
+    const delay = hasFilters && !query.trim() && selectedTag ? 0 : 300;
     const timeout = setTimeout(() => {
-      if (query.trim() || selectedDeck || selectedTag || selectedNoteTypeId) {
+      if (hasFilters) {
         doSearch();
       } else {
         setResults([]);
       }
-    }, 300);
+    }, delay);
     return () => clearTimeout(timeout);
   }, [query, selectedDeck, selectedTag, selectedNoteTypeId, doSearch, tab]);
 
@@ -101,17 +112,66 @@ export function CardBrowser() {
     return tags.filter(([, name]) => name.toLowerCase().includes(q));
   }, [tags, tagFilter]);
 
+  const deckFilterOptions = useMemo(
+    () =>
+      flattenDecksForPicker(decks).map((d) => ({
+        value: d.id,
+        label: d.name,
+        depth: d.depth,
+      })),
+    [decks]
+  );
+
+  const tagFilterOptions = useMemo(
+    () =>
+      [...tags]
+        .sort((a, b) => a[1].localeCompare(b[1]))
+        .map(([, name, count]) => ({
+          value: name,
+          label: name,
+          hint: String(count),
+        })),
+    [tags]
+  );
+
   const selectTag = (name: string) => {
     setSelectedTag(name);
     setTab("tags");
     setQuery("");
     setSelectedDeck("");
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      next.set("tag", name);
+      return next;
+    });
   };
 
   const clearTagFilter = () => {
     setSelectedTag("");
     setResults([]);
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      next.delete("tag");
+      return next;
+    });
   };
+
+  const handleTagsUpdated = useCallback((noteId: string, tags: string[]) => {
+    setResults((prev) =>
+      prev.map((r) => (r.note_id === noteId ? { ...r, tags } : r))
+    );
+  }, []);
+
+  const handleNoteUpdated = useCallback(
+    (noteId: string, fields: Record<string, string>, tags: string[]) => {
+      setResults((prev) =>
+        prev.map((r) =>
+          r.note_id === noteId ? { ...r, fields_json: fields, tags } : r
+        )
+      );
+    },
+    []
+  );
 
   return (
     <div className="h-full flex flex-col p-6">
@@ -174,11 +234,13 @@ export function CardBrowser() {
           <div className="w-72 shrink-0 flex flex-col border border-border rounded-xl bg-surface-alt overflow-hidden">
             <div className="p-2 border-b border-border">
               <input
-                type="search"
+                type="text"
                 value={tagFilter}
                 onChange={(e) => setTagFilter(e.target.value)}
                 placeholder="Filter tags…"
                 className="w-full px-2.5 py-1.5 text-sm bg-surface border border-border rounded-lg focus:outline-none focus:border-primary-500"
+                name="samsmrti-browse-tag-filter"
+                {...filterInputProps}
               />
             </div>
             <div className="flex-1 overflow-y-auto p-2 space-y-0.5">
@@ -234,6 +296,8 @@ export function CardBrowser() {
                     expanded={expanded}
                     setExpanded={setExpanded}
                     noteTypes={noteTypes}
+                    onTagsUpdated={handleTagsUpdated}
+                    onNoteUpdated={handleNoteUpdated}
                   />
                 </div>
               </>
@@ -302,31 +366,29 @@ export function CardBrowser() {
               onChange={(e) => setQuery(e.target.value)}
               placeholder="Search cards..."
               className="flex-1 px-4 py-2.5 bg-surface-alt border border-border rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary-500"
+              name="samsmrti-card-search"
+              {...filterInputProps}
             />
-            <select
+            <SearchableFilterCombobox
+              options={deckFilterOptions}
               value={selectedDeck}
-              onChange={(e) => setSelectedDeck(e.target.value)}
-              className="px-3 py-2.5 bg-surface-alt border border-border rounded-xl text-sm max-w-[180px]"
-            >
-              <option value="">All Decks</option>
-              {decks.map((d) => (
-                <option key={d.id} value={d.id}>
-                  {d.name}
-                </option>
-              ))}
-            </select>
-            <select
+              onChange={setSelectedDeck}
+              placeholder="All Decks"
+              clearLabel="All Decks"
+              className="w-[200px] shrink-0"
+              inputName="samsmrti-browse-deck-filter"
+              ariaLabel="Filter by deck"
+            />
+            <SearchableFilterCombobox
+              options={tagFilterOptions}
               value={selectedTag}
-              onChange={(e) => setSelectedTag(e.target.value)}
-              className="px-3 py-2.5 bg-surface-alt border border-border rounded-xl text-sm max-w-[200px]"
-            >
-              <option value="">All Tags</option>
-              {tags.map(([, name, count]) => (
-                <option key={name} value={name}>
-                  {name} ({count})
-                </option>
-              ))}
-            </select>
+              onChange={setSelectedTag}
+              placeholder="All Tags"
+              clearLabel="All Tags"
+              className="w-[220px] shrink-0"
+              inputName="samsmrti-browse-tag-combobox"
+              ariaLabel="Filter by tag"
+            />
           </div>
 
           <div className="flex-1 overflow-y-auto min-h-0">
@@ -341,6 +403,8 @@ export function CardBrowser() {
               expanded={expanded}
               setExpanded={setExpanded}
               noteTypes={noteTypes}
+              onTagsUpdated={handleTagsUpdated}
+              onNoteUpdated={handleNoteUpdated}
             />
           </div>
         </>

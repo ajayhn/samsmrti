@@ -1,10 +1,9 @@
-use crate::commands::profiles::ActiveProfile;
+use crate::commands::window_profiles::WindowProfiles;
 use crate::commands::review::ReviewCard;
 use crate::db::deck_tree::deck_scope_ids;
 use crate::db::Database;
 use serde::{Deserialize, Serialize};
-use std::sync::Mutex;
-use tauri::State;
+use tauri::{State, WebviewWindow};
 
 // ── Entity types ────────────────────────────────────────────────────────────
 
@@ -751,11 +750,12 @@ pub fn get_cards_for_triple(
 #[tauri::command]
 pub fn get_mindmap(
     db: State<Database>,
-    active: State<'_, Mutex<ActiveProfile>>,
+    window: WebviewWindow,
+    profiles: State<'_, WindowProfiles>,
     entity_id: String,
 ) -> Result<MindMapData, String> {
-    let active_guard = active.lock().map_err(|e| e.to_string())?;
-    let profile_id = active_guard.id.clone();
+    let active = profiles.for_window(&window)?;
+    let profile_id = active.id.clone();
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let now = chrono::Utc::now().timestamp();
 
@@ -1038,12 +1038,13 @@ pub fn suggest_cards_from_triples(
 #[tauri::command]
 pub fn get_ere_due_cards(
     db: State<Database>,
-    active: State<'_, Mutex<ActiveProfile>>,
+    window: WebviewWindow,
+    profiles: State<'_, WindowProfiles>,
     deck_id: String,
     entity_id: Option<String>,
 ) -> Result<Vec<ReviewCard>, String> {
-    let active_guard = active.lock().map_err(|e| e.to_string())?;
-    let profile_id = active_guard.id.clone();
+    let active = profiles.for_window(&window)?;
+    let profile_id = active.id.clone();
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let now = chrono::Utc::now().timestamp();
 
@@ -1140,11 +1141,12 @@ pub fn get_ere_due_cards(
 #[tauri::command]
 pub fn get_ere_review_summary(
     db: State<Database>,
-    active: State<'_, Mutex<ActiveProfile>>,
+    window: WebviewWindow,
+    profiles: State<'_, WindowProfiles>,
     deck_id: String,
 ) -> Result<Vec<EreReviewEntity>, String> {
-    let active_guard = active.lock().map_err(|e| e.to_string())?;
-    let profile_id = active_guard.id.clone();
+    let active = profiles.for_window(&window)?;
+    let profile_id = active.id.clone();
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let now = chrono::Utc::now().timestamp();
     let scope = deck_scope_ids(&conn, &deck_id).map_err(|e| e.to_string())?;

@@ -7,5 +7,6 @@ pub mod karma;
 pub mod note_types;
 pub mod notes;
 pub mod profiles;
+pub mod window_profiles;
 pub mod review;
 pub mod search;

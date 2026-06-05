@@ -1,12 +1,12 @@
 use crate::commands::karma::{self, KarmaEarnEvent};
-use crate::commands::profiles::ActiveProfile;
+use crate::commands::window_profiles::WindowProfiles;
 use crate::commands::search::upsert_note_fts_conn;
 use crate::db::card_progress;
 use crate::db::deck_tree::deck_scope_ids;
 use crate::db::{sync_country_note, Database};
+use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
-use std::sync::Mutex;
-use tauri::State;
+use tauri::{State, WebviewWindow};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct NoteType {
@@ -212,10 +212,11 @@ pub struct CreateNoteResult {
 #[tauri::command]
 pub fn create_note(
     db: State<Database>,
-    active: State<'_, Mutex<ActiveProfile>>,
+    window: WebviewWindow,
+    profiles: State<'_, WindowProfiles>,
     input: CreateNoteInput,
 ) -> Result<CreateNoteResult, String> {
-    let active_guard = active.lock().map_err(|e| e.to_string())?;
+    let active = profiles.for_window(&window)?;
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let note_id = format!("n_{}", uuid::Uuid::new_v4().simple());
     let now = chrono::Utc::now().timestamp();
@@ -317,7 +318,7 @@ pub fn create_note(
     upsert_note_fts_conn(&conn, &note_id, &fields_str)?;
 
     let card_count = karma::count_cards_for_note(&conn, &note_id)?;
-    let karma = karma::earn_add_conn(&conn, &active_guard, card_count)?;
+    let karma = karma::earn_add_conn(&conn, &active, card_count)?;
 
     Ok(CreateNoteResult {
         note: Note {
@@ -331,6 +332,38 @@ pub fn create_note(
         },
         karma,
     })
+}
+
+/// Most-used note type in this deck (includes subdecks). `None` if the deck has no notes.
+#[tauri::command]
+pub fn get_deck_primary_note_type(
+    db: State<Database>,
+    deck_id: String,
+) -> Result<Option<String>, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let scope = deck_scope_ids(&conn, &deck_id).map_err(|e| e.to_string())?;
+    if scope.is_empty() {
+        return Ok(None);
+    }
+
+    let placeholders = scope.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
+    let sql = format!(
+        "SELECT note_type_id, COUNT(*) AS cnt FROM notes
+         WHERE deck_id IN ({placeholders})
+         GROUP BY note_type_id
+         ORDER BY cnt DESC
+         LIMIT 1"
+    );
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+        scope.iter().map(|id| id as &dyn rusqlite::types::ToSql).collect();
+
+    let result = stmt
+        .query_row(param_refs.as_slice(), |row| row.get::<_, String>(0))
+        .optional()
+        .map_err(|e| e.to_string())?;
+
+    Ok(result)
 }
 
 #[tauri::command]
@@ -483,6 +516,37 @@ pub fn get_note_tags(db: State<Database>, note_id: String) -> Result<Vec<String>
 }
 
 #[tauri::command]
+pub fn get_card_flag(db: State<Database>, card_id: String) -> Result<bool, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let flagged: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM card_flags WHERE card_id = ?1)",
+            [&card_id],
+            |row| Ok(row.get::<_, i64>(0)? != 0),
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(flagged)
+}
+
+#[tauri::command]
+pub fn set_card_flag(db: State<Database>, card_id: String, flagged: bool) -> Result<bool, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    if flagged {
+        let now = chrono::Utc::now().timestamp();
+        conn.execute(
+            "INSERT INTO card_flags (card_id, flagged_at) VALUES (?1, ?2)
+             ON CONFLICT(card_id) DO UPDATE SET flagged_at = excluded.flagged_at",
+            (&card_id, now),
+        )
+        .map_err(|e| e.to_string())?;
+    } else {
+        conn.execute("DELETE FROM card_flags WHERE card_id = ?1", [&card_id])
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(flagged)
+}
+
+#[tauri::command]
 pub fn delete_note(db: State<Database>, id: String) -> Result<(), String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     conn.execute("DELETE FROM notes WHERE id = ?1", [&id])
@@ -493,10 +557,11 @@ pub fn delete_note(db: State<Database>, id: String) -> Result<(), String> {
 #[tauri::command]
 pub fn get_cards_for_note(
     db: State<Database>,
-    active: State<'_, Mutex<ActiveProfile>>,
+    window: WebviewWindow,
+    profiles: State<'_, WindowProfiles>,
     note_id: String,
 ) -> Result<Vec<Card>, String> {
-    let active_guard = active.lock().map_err(|e| e.to_string())?;
+    let active = profiles.for_window(&window)?;
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let mut stmt = conn
         .prepare(
@@ -508,7 +573,7 @@ pub fn get_cards_for_note(
         .map_err(|e| e.to_string())?;
 
     let cards = stmt
-        .query_map((&note_id, &active_guard.id), |row| {
+        .query_map((&note_id, &active.id), |row| {
             Ok(Card {
                 id: row.get(0)?,
                 note_id: row.get(1)?,

@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Samsmrti">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#4f46e5"/>
+      <stop offset="100%" stop-color="#7c3aed"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#bg)"/>
+  <g transform="translate(256 256) scale(0.80) translate(-256 -256)" fill="none" stroke="#fff" stroke-width="20" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M256 118c-62 0-98 38-98 88 0 28 12 52 32 68-18 14-28 34-28 58 0 48 42 88 94 88s94-40 94-88c0-24-10-44-28-58 20-16 32-40 32-68 0-50-36-88-98-88z"/>
+    <path d="M256 174v196"/>
+    <path d="M206 210c24-18 76-18 100 0"/>
+    <path d="M198 268c22 14 94 14 116 0"/>
+    <path d="M210 326c18 12 74 12 92 0"/>
+    <path d="M220 152c8-22 24-34 36-34s28 12 36 34"/>
+    <circle cx="196" cy="156" r="10" fill="#c4b5fd"/>
+    <circle cx="316" cy="156" r="10" fill="#c4b5fd"/>
+    <circle cx="340" cy="248" r="8" fill="#e9d5ff" opacity="0.9"/>
+  </g>
+</svg>

@@ -200,8 +200,9 @@ export function Settings() {
           <p className="text-sm font-medium text-text">Export / import content</p>
           <p className="text-xs text-text-muted">
             JSON collection for sharing decks with someone who starts fresh (no review
-            history, profiles, or karma). Also under <strong>File → Export Content</strong>{" "}
-            and <strong>Import Content</strong>.
+            history, profiles, or karma). Choose which decks to include (default: all).
+            Also under <strong>File → Export Content</strong> and{" "}
+            <strong>Import Content</strong>.
           </p>
           <div className="flex flex-wrap gap-2">
             <button

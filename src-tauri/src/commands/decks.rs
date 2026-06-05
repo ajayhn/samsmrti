@@ -1,10 +1,9 @@
-use crate::commands::profiles::ActiveProfile;
+use crate::commands::window_profiles::WindowProfiles;
 use crate::db::deck_tree::{deck_scope_ids, direct_deck_counts, is_ancestor_of, rollup_deck_counts};
 use crate::db::Database;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::Mutex;
-use tauri::State;
+use tauri::{State, WebviewWindow};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Deck {
@@ -74,9 +73,10 @@ fn validate_parent(
 #[tauri::command]
 pub fn get_decks(
     db: State<Database>,
-    active: State<'_, Mutex<ActiveProfile>>,
+    window: WebviewWindow,
+    profiles: State<'_, WindowProfiles>,
 ) -> Result<Vec<DeckWithCounts>, String> {
-    let active_guard = active.lock().map_err(|e| e.to_string())?;
+    let active = profiles.for_window(&window)?;
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let now = chrono::Utc::now().timestamp();
 
@@ -110,7 +110,7 @@ pub fn get_decks(
         .map(|d| (d.id.clone(), d.parent_id.clone()))
         .collect();
     let direct =
-        direct_deck_counts(&conn, &active_guard.id, now).map_err(|e| e.to_string())?;
+        direct_deck_counts(&conn, &active.id, now).map_err(|e| e.to_string())?;
     let rolled = rollup_deck_counts(&deck_ids, &parent_of, &direct);
 
     let decks = rows
@@ -218,9 +218,17 @@ pub fn update_deck(db: State<Database>, input: UpdateDeckInput) -> Result<Deck, 
     })
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct DeletedDeckSnapshot {
+    pub root_deck_id: String,
+    pub data: serde_json::Value,
+}
+
 #[tauri::command]
-pub fn delete_deck(db: State<Database>, id: String) -> Result<(), String> {
+pub fn delete_deck(db: State<Database>, id: String) -> Result<DeletedDeckSnapshot, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let snapshot_data =
+        crate::backup::content::build_deck_delete_snapshot(&conn, &id).map_err(|e| e.to_string())?;
     let scope = deck_scope_ids(&conn, &id).map_err(|e| e.to_string())?;
 
     // Delete deepest subdecks first so notes/cards cascade cleanly.
@@ -248,5 +256,18 @@ pub fn delete_deck(db: State<Database>, id: String) -> Result<(), String> {
         conn.execute("DELETE FROM decks WHERE id = ?1", [&deck_id])
             .map_err(|e| e.to_string())?;
     }
-    Ok(())
+    Ok(DeletedDeckSnapshot {
+        root_deck_id: id,
+        data: snapshot_data,
+    })
+}
+
+#[tauri::command]
+pub fn restore_deleted_deck(
+    db: State<Database>,
+    snapshot: DeletedDeckSnapshot,
+) -> Result<(), String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    crate::backup::content::restore_deck_delete_snapshot(&conn, &snapshot.data)
+        .map_err(|e| e.to_string())
 }

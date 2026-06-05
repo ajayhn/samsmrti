@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
+import { filterInputProps } from "../../lib/filterInput";
 import { api, type NoteType, type NoteTypeUsageSummary } from "../../lib/tauri";
 
 function formatCount(n: number): string {
@@ -420,12 +421,14 @@ export function NoteTypeManager() {
       {noteTypes.length > 0 && (
         <div className="mb-4">
           <input
-            type="search"
+            type="text"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             placeholder="Search note types by name, field, or template…"
             className="w-full px-3 py-2.5 text-sm bg-surface-alt border border-border rounded-xl text-text placeholder:text-text-muted focus:outline-none focus:ring-2 focus:ring-primary-500"
             aria-label="Search note types"
+            name="samsmrti-note-type-search"
+            {...filterInputProps}
           />
           {searchQuery.trim() && (
             <p className="text-xs text-text-muted mt-1.5">

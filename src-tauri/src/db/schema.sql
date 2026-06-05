@@ -79,6 +79,11 @@ CREATE TABLE IF NOT EXISTS note_tags (
     PRIMARY KEY (note_id, tag_id)
 );
 
+CREATE TABLE IF NOT EXISTS card_flags (
+    card_id     TEXT PRIMARY KEY REFERENCES cards(id) ON DELETE CASCADE,
+    flagged_at  INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS note_links (
     id             TEXT PRIMARY KEY,
     source_note_id TEXT NOT NULL REFERENCES notes(id) ON DELETE CASCADE,

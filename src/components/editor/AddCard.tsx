@@ -3,8 +3,11 @@ import { useParams, useNavigate } from "react-router-dom";
 import { api, type NoteType, type Triple } from "../../lib/tauri";
 import { useDeckStore } from "../../stores/deckStore";
 import { useActivityTracker } from "../../hooks/useActivityTracker";
+import { NoteTypeSelect } from "./NoteTypeSelect";
+import { TagInput } from "./TagInput";
 import { RichEditor } from "./RichEditor";
 import { renderTemplate } from "../../lib/cloze";
+import { filterInputProps } from "../../lib/filterInput";
 
 export function AddCard() {
   useActivityTracker(true);
@@ -17,7 +20,7 @@ export function AddCard() {
   const [fields, setFields] = useState<Record<string, string>>({});
   const [fieldTexts, setFieldTexts] = useState<Record<string, string>>({});
   const [activeField, setActiveField] = useState<string>("");
-  const [tags, setTags] = useState("");
+  const [tags, setTags] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [showPreview, setShowPreview] = useState(false);
@@ -27,13 +30,30 @@ export function AddCard() {
   const [linkedTripleIds, setLinkedTripleIds] = useState<Set<string>>(new Set());
 
   useEffect(() => {
-    api.getNoteTypes().then((types) => {
+    if (!deckId) return;
+    let cancelled = false;
+    (async () => {
+      const types = await api.getNoteTypes();
+      if (cancelled || types.length === 0) return;
       setNoteTypes(types);
-      if (types.length > 0) {
-        selectNoteType(types[0]);
+
+      let primaryId: string | null = null;
+      try {
+        primaryId = await api.getDeckPrimaryNoteType(deckId);
+      } catch {
+        primaryId = null;
       }
-    });
-  }, []);
+
+      const defaultType =
+        (primaryId && types.find((t) => t.id === primaryId)) ||
+        types.find((t) => t.id === "nt_basic") ||
+        types[0];
+      if (defaultType) selectNoteType(defaultType);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [deckId]);
 
   const searchTriples = useCallback(async (q: string) => {
     try {
@@ -83,11 +103,6 @@ export function AddCard() {
     setActiveField(nt.fields[0]?.name || "");
   };
 
-  const handleTypeChange = (typeId: string) => {
-    const nt = noteTypes.find((t) => t.id === typeId);
-    if (nt) selectNoteType(nt);
-  };
-
   const handleFieldChange = (fieldName: string, html: string, text: string) => {
     setFields((prev) => ({ ...prev, [fieldName]: html }));
     setFieldTexts((prev) => ({ ...prev, [fieldName]: text }));
@@ -105,10 +120,7 @@ export function AddCard() {
         deck_id: deckId,
         note_type_id: selectedType.id,
         fields: fieldsToSend,
-        tags: tags
-          .split(",")
-          .map((t) => t.trim())
-          .filter(Boolean),
+        tags,
       });
       const { useKarmaStore } = await import("../../stores/karmaStore");
       useKarmaStore.getState().applyEarn(karma);
@@ -123,6 +135,10 @@ export function AddCard() {
       }
 
       await fetchDecks();
+      if (tags.length > 0) {
+        const { useTagListStore } = await import("../../stores/tagListStore");
+        useTagListStore.getState().notifyTagsChanged();
+      }
 
       const initial: Record<string, string> = {};
       const initialTexts: Record<string, string> = {};
@@ -132,7 +148,7 @@ export function AddCard() {
       });
       setFields(initial);
       setFieldTexts(initialTexts);
-      setTags("");
+      setTags([]);
       setLinkedTripleIds(new Set());
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
@@ -189,17 +205,11 @@ export function AddCard() {
         <label className="block text-sm font-medium text-text-secondary mb-2">
           Note Type
         </label>
-        <select
+        <NoteTypeSelect
+          noteTypes={noteTypes}
           value={selectedType.id}
-          onChange={(e) => handleTypeChange(e.target.value)}
-          className="w-full px-4 py-2.5 bg-surface-alt border border-border rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary-500"
-        >
-          {noteTypes.map((nt) => (
-            <option key={nt.id} value={nt.id}>
-              {nt.name}
-            </option>
-          ))}
-        </select>
+          onChange={selectNoteType}
+        />
       </div>
 
       {/* Cloze hint */}
@@ -293,13 +303,7 @@ export function AddCard() {
         <label className="block text-sm font-medium text-text-secondary mb-1.5">
           Tags
         </label>
-        <input
-          type="text"
-          value={tags}
-          onChange={(e) => setTags(e.target.value)}
-          placeholder="Comma-separated tags (e.g., science::biology, exam)"
-          className="w-full px-4 py-2.5 bg-surface-alt border border-border rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary-500"
-        />
+        <TagInput value={tags} onChange={setTags} />
       </div>
 
       {/* Link to Knowledge Graph */}
@@ -320,10 +324,13 @@ export function AddCard() {
         {showTripleLink && (
           <div className="mt-3 border border-border rounded-xl p-3 bg-surface-alt">
             <input
+              type="text"
               value={tripleSearch}
               onChange={(e) => setTripleSearch(e.target.value)}
               placeholder="Search triples..."
               className="w-full px-3 py-2 bg-surface border border-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 mb-2"
+              name="samsmrti-triple-search"
+              {...filterInputProps}
             />
             <div className="max-h-40 overflow-y-auto space-y-1">
               {availableTriples.length === 0 && (

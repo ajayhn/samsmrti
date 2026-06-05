@@ -5,13 +5,133 @@ pub mod import;
 pub mod seed;
 
 use commands::profiles::load_active_profile_from_db;
+use commands::window_profiles::{compute_window_titles, open_new_window, sync_window_titles_and_menu, WindowProfiles};
 use db::Database;
 use import::apkg;
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use std::sync::Mutex;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::{Emitter, Manager};
+
+const MENU_NEW_WINDOW: &str = "new_window";
+const MENU_EXPORT_CONTENT: &str = "export_content";
+const MENU_IMPORT_CONTENT: &str = "import_content";
+const MENU_EXPORT_FULL: &str = "export_full_backup";
+const MENU_RESTORE_FULL: &str = "restore_full_backup";
+const MENU_UNDO: &str = "undo";
+const MENU_FOCUS_PREFIX: &str = "focus_window::";
+
+fn build_menu(app: &tauri::AppHandle) -> Result<Menu<tauri::Wry>, tauri::Error> {
+    let new_window = MenuItem::with_id(app, MENU_NEW_WINDOW, "New Window", true, None::<&str>)?;
+    let export_content = MenuItem::with_id(
+        app,
+        MENU_EXPORT_CONTENT,
+        "Export Content…",
+        true,
+        None::<&str>,
+    )?;
+    let import_content = MenuItem::with_id(
+        app,
+        MENU_IMPORT_CONTENT,
+        "Import Content…",
+        true,
+        None::<&str>,
+    )?;
+    let export_full = MenuItem::with_id(
+        app,
+        MENU_EXPORT_FULL,
+        "Backup (Full)…",
+        true,
+        None::<&str>,
+    )?;
+    let restore_full = MenuItem::with_id(
+        app,
+        MENU_RESTORE_FULL,
+        "Restore (Full)…",
+        true,
+        None::<&str>,
+    )?;
+    let file_menu = Submenu::with_items(
+        app,
+        "File",
+        true,
+        &[
+            &new_window,
+            &PredefinedMenuItem::separator(app)?,
+            &export_content,
+            &import_content,
+            &PredefinedMenuItem::separator(app)?,
+            &export_full,
+            &restore_full,
+        ],
+    )?;
+
+    let undo_item = MenuItem::with_id(app, MENU_UNDO, "Undo", true, Some("CmdOrCtrl+Z"))?;
+    let edit_menu = Submenu::with_items(
+        app,
+        "Edit",
+        true,
+        &[
+            &undo_item,
+            &PredefinedMenuItem::redo(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::cut(app, None)?,
+            &PredefinedMenuItem::copy(app, None)?,
+            &PredefinedMenuItem::paste(app, None)?,
+            &PredefinedMenuItem::select_all(app, None)?,
+        ],
+    )?;
+
+    let mut window_items: Vec<Box<dyn tauri::menu::IsMenuItem<tauri::Wry>>> = vec![
+        Box::new(PredefinedMenuItem::minimize(app, None)?),
+        Box::new(PredefinedMenuItem::maximize(app, None)?),
+        Box::new(PredefinedMenuItem::close_window(app, None)?),
+        Box::new(PredefinedMenuItem::separator(app)?),
+        Box::new(PredefinedMenuItem::bring_all_to_front(app, None)?),
+    ];
+    let mut windows: Vec<_> = app.webview_windows().into_iter().collect();
+    windows.sort_by(|a, b| a.0.cmp(&b.0));
+    let window_titles = app
+        .try_state::<Database>()
+        .zip(app.try_state::<WindowProfiles>())
+        .map(|(db, profiles)| compute_window_titles(app, &db, &profiles))
+        .unwrap_or_default();
+    if !windows.is_empty() {
+        window_items.push(Box::new(PredefinedMenuItem::separator(app)?));
+        for (label, window) in windows {
+            let title = window_titles
+                .get(&label)
+                .cloned()
+                .unwrap_or_else(|| window.title().unwrap_or_else(|_| label.clone()));
+            let item = MenuItem::with_id(
+                app,
+                format!("{MENU_FOCUS_PREFIX}{label}"),
+                title,
+                true,
+                None::<&str>,
+            )?;
+            window_items.push(Box::new(item));
+        }
+    }
+    let window_item_refs: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> =
+        window_items.iter().map(|i| i.as_ref()).collect();
+    let window_menu = Submenu::with_items(app, "Window", true, &window_item_refs)?;
+
+    let app_name = app.package_info().name.clone();
+    let quit_label = format!("Quit {app_name}");
+    let quit_item = PredefinedMenuItem::quit(app, Some(quit_label.as_str()))?;
+    let app_menu = Submenu::with_items(app, &app_name, true, &[&quit_item])?;
+
+    Menu::with_items(app, &[&app_menu, &file_menu, &edit_menu, &window_menu])
+}
+
+fn refresh_menu(app: &tauri::AppHandle) {
+    if let Ok(menu) = build_menu(app) {
+        let _ = app.set_menu(menu);
+    }
+}
 
 /// Import quizbowl packet PNGs as cloze notes (deck `ssnct`).
 pub fn import_quizbowl_file(
@@ -91,85 +211,48 @@ pub fn run() {
                 load_active_profile_from_db(&conn).expect("Failed to load active profile")
             };
             app.manage(database);
-            app.manage(Mutex::new(active_profile));
 
-            let export_content = MenuItem::with_id(
-                app,
-                "export_content",
-                "Export Content…",
-                true,
-                None::<&str>,
-            )?;
-            let import_content = MenuItem::with_id(
-                app,
-                "import_content",
-                "Import Content…",
-                true,
-                None::<&str>,
-            )?;
-            let backup_sep = PredefinedMenuItem::separator(app)?;
-            let export_full = MenuItem::with_id(
-                app,
-                "export_full_backup",
-                "Backup (Full)…",
-                true,
-                None::<&str>,
-            )?;
-            let restore_full = MenuItem::with_id(
-                app,
-                "restore_full_backup",
-                "Restore (Full)…",
-                true,
-                None::<&str>,
-            )?;
-            let file_menu = Submenu::with_items(
-                app,
-                "File",
-                true,
-                &[
-                    &export_content,
-                    &import_content,
-                    &backup_sep,
-                    &export_full,
-                    &restore_full,
-                ],
-            )?;
+            let window_profiles = WindowProfiles(Mutex::new(HashMap::new()));
+            window_profiles.register("main", active_profile);
+            app.manage(window_profiles);
 
-            let edit_menu = Submenu::with_items(
-                app,
-                "Edit",
-                true,
-                &[
-                    &PredefinedMenuItem::undo(app, None)?,
-                    &PredefinedMenuItem::redo(app, None)?,
-                    &PredefinedMenuItem::separator(app)?,
-                    &PredefinedMenuItem::cut(app, None)?,
-                    &PredefinedMenuItem::copy(app, None)?,
-                    &PredefinedMenuItem::paste(app, None)?,
-                    &PredefinedMenuItem::select_all(app, None)?,
-                ],
-            )?;
-
-            let app_name = app.package_info().name.clone();
-            let quit_label = format!("Quit {app_name}");
-            let quit_item = PredefinedMenuItem::quit(app, Some(quit_label.as_str()))?;
-            let app_menu = Submenu::with_items(app, &app_name, true, &[&quit_item])?;
-
-            let menu = Menu::with_items(app, &[&app_menu, &file_menu, &edit_menu])?;
-            app.set_menu(menu)?;
+            {
+                sync_window_titles_and_menu(&app.handle());
+            }
 
             let handle = app.handle().clone();
-            app.on_menu_event(move |_app, event| {
-                if event.id() == export_content.id() {
+            app.on_menu_event(move |app_handle, event| {
+                let event_id = event.id().0.as_str();
+                if event_id == MENU_NEW_WINDOW {
+                    let db = app_handle.state::<Database>();
+                    let profiles = app_handle.state::<WindowProfiles>();
+                    if let Err(e) = open_new_window(app_handle, &db, &profiles) {
+                        eprintln!("Failed to open new window: {e}");
+                    }
+                } else if let Some(label) = event_id.strip_prefix(MENU_FOCUS_PREFIX) {
+                    if let Some(window) = app_handle.get_webview_window(label) {
+                        let _ = window.unminimize();
+                        let _ = window.show();
+                        let _ = window.set_focus();
+                    }
+                } else if event_id == MENU_UNDO {
+                    let _ = handle.emit("menu-undo", ());
+                } else if event_id == MENU_EXPORT_CONTENT {
                     let _ = handle.emit("menu-export-content", ());
-                } else if event.id() == import_content.id() {
+                } else if event_id == MENU_IMPORT_CONTENT {
                     let _ = handle.emit("menu-import-content", ());
-                } else if event.id() == export_full.id() {
+                } else if event_id == MENU_EXPORT_FULL {
                     let _ = handle.emit("menu-export-full-backup", ());
-                } else if event.id() == restore_full.id() {
+                } else if event_id == MENU_RESTORE_FULL {
                     let _ = handle.emit("menu-restore-full-backup", ());
                 }
             });
+
+            // Ensure dock/window icon in dev (embedded at compile time via include_image).
+            let icon = tauri::include_image!("icons/128x128.png");
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.set_icon(icon);
+            }
 
             Ok(())
         })
@@ -178,10 +261,14 @@ pub fn run() {
             commands::decks::create_deck,
             commands::decks::update_deck,
             commands::decks::delete_deck,
+            commands::decks::restore_deleted_deck,
             commands::notes::get_note_types,
             commands::notes::create_note,
+            commands::notes::get_deck_primary_note_type,
             commands::notes::get_notes,
             commands::notes::get_note_tags,
+            commands::notes::get_card_flag,
+            commands::notes::set_card_flag,
             commands::notes::update_note,
             commands::notes::delete_note,
             commands::notes::get_cards_for_note,
@@ -207,6 +294,8 @@ pub fn run() {
             commands::search::get_stats_overview,
             commands::export::export_deck_json,
             commands::export::export_all_gz,
+            commands::backup::list_content_export_decks,
+            commands::backup::preview_content_import,
             commands::backup::export_content_json,
             commands::backup::import_content_json,
             commands::backup::export_full_backup,

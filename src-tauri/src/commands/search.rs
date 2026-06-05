@@ -1,11 +1,10 @@
-use crate::commands::profiles::ActiveProfile;
+use crate::commands::window_profiles::WindowProfiles;
 use crate::db::deck_tree::deck_scope_ids;
 use crate::db::Database;
 use rusqlite::Connection;
 use serde::Serialize;
 use std::collections::HashMap;
-use std::sync::Mutex;
-use tauri::State;
+use tauri::{State, WebviewWindow};
 
 #[derive(Debug, Serialize)]
 pub struct SearchResult {
@@ -312,10 +311,11 @@ pub struct DailyReview {
 #[tauri::command]
 pub fn get_stats_overview(
     db: State<Database>,
-    active: State<'_, Mutex<ActiveProfile>>,
+    window: WebviewWindow,
+    profiles: State<'_, WindowProfiles>,
 ) -> Result<StatsOverview, String> {
-    let active_guard = active.lock().map_err(|e| e.to_string())?;
-    let profile_id = active_guard.id.clone();
+    let active = profiles.for_window(&window)?;
+    let profile_id = active.id.clone();
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let now = chrono::Utc::now().timestamp();
     let today_start = now - (now % 86400);

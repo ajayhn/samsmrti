@@ -1,16 +1,19 @@
 use crate::commands::search::ensure_search_index_conn;
 use crate::db::card_progress;
+use crate::db::deck_tree::{deck_scope_ids, rollup_deck_counts};
 use flate2::read::GzDecoder;
 use rusqlite::types::Value as SqlValue;
 use rusqlite::{Connection, Row};
 use serde::Serialize;
 use serde_json::{json, Map, Value};
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Read;
 use std::path::Path;
 
 pub const FORMAT_CONTENT_V1: &str = "samsmrti-content-v1";
 pub const FORMAT_LEGACY_BACKUP_V1: &str = "samsmrti-backup-v1";
+pub const FORMAT_DECK_UNDO_V1: &str = "samsmrti-deck-undo-v1";
 
 #[derive(Debug, Serialize)]
 pub struct ContentExportSummary {
@@ -20,6 +23,14 @@ pub struct ContentExportSummary {
     pub cards: usize,
     pub entities: usize,
     pub triples: usize,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct ContentDeckPreview {
+    pub id: String,
+    pub name: String,
+    pub parent_id: Option<String>,
+    pub note_count: usize,
 }
 
 #[derive(Debug, Serialize, Default)]
@@ -67,7 +78,495 @@ fn fetch_rows(conn: &Connection, sql: &str) -> Result<Vec<Value>, String> {
     Ok(rows)
 }
 
-pub fn build_content_payload(conn: &Connection) -> Result<Value, String> {
+/// `None` or empty selection = all decks.
+pub fn resolve_deck_scope(
+    conn: &Connection,
+    selected_deck_ids: Option<&[String]>,
+) -> Result<Option<HashSet<String>>, String> {
+    let Some(ids) = selected_deck_ids else {
+        return Ok(None);
+    };
+    if ids.is_empty() {
+        return Ok(None);
+    }
+
+    let mut scope = HashSet::new();
+    for id in ids {
+        for deck_id in deck_scope_ids(conn, id).map_err(|e| e.to_string())? {
+            add_deck_and_ancestors(conn, &deck_id, &mut scope)?;
+        }
+    }
+    Ok(Some(scope))
+}
+
+fn add_deck_and_ancestors(
+    conn: &Connection,
+    deck_id: &str,
+    scope: &mut HashSet<String>,
+) -> Result<(), String> {
+    let mut current = Some(deck_id.to_string());
+    while let Some(did) = current {
+        if !scope.insert(did.clone()) {
+            break;
+        }
+        let parent: Option<String> = conn
+            .query_row(
+                "SELECT parent_id FROM decks WHERE id = ?1",
+                [&did],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        current = parent.filter(|p| !p.is_empty());
+    }
+    Ok(())
+}
+
+fn resolve_deck_scope_from_payload(
+    data: &Value,
+    selected_deck_ids: Option<&[String]>,
+) -> Option<HashSet<String>> {
+    let ids = selected_deck_ids?;
+    if ids.is_empty() {
+        return None;
+    }
+
+    let decks = data.get("decks")?.as_array()?;
+
+    let mut parent_of: HashMap<String, Option<String>> = HashMap::new();
+    let mut children_of: HashMap<String, Vec<String>> = HashMap::new();
+
+    for deck in decks {
+        let Some(id) = deck.get("id").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let id = id.to_string();
+        let parent_id = deck.get("parent_id").and_then(|v| {
+            if v.is_null() {
+                None
+            } else {
+                v.as_str().map(str::to_string)
+            }
+        });
+        parent_of.insert(id.clone(), parent_id.clone());
+        children_of.entry(id.clone()).or_default();
+        if let Some(p) = parent_id {
+            children_of.entry(p).or_default().push(id);
+        }
+    }
+
+    let mut scope = HashSet::new();
+    for root in ids {
+        let mut stack = vec![root.clone()];
+        while let Some(id) = stack.pop() {
+            if scope.insert(id.clone()) {
+                if let Some(kids) = children_of.get(&id) {
+                    stack.extend(kids.iter().cloned());
+                }
+            }
+        }
+        let mut current = Some(root.as_str());
+        while let Some(did) = current {
+            scope.insert(did.to_string());
+            current = parent_of
+                .get(did)
+                .and_then(|p| p.as_deref());
+        }
+    }
+
+    Some(scope)
+}
+
+fn row_in_deck_scope(row: &Value, deck_field: &str, scope: &HashSet<String>) -> bool {
+    row.get(deck_field)
+        .and_then(|v| v.as_str())
+        .map(|id| scope.contains(id))
+        .unwrap_or(false)
+}
+
+fn filter_content_payload(data: Value, scope: &HashSet<String>) -> Value {
+    let Some(mut obj) = data.as_object().cloned() else {
+        return data;
+    };
+
+    let decks: Vec<Value> = obj
+        .get("decks")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|d| {
+            d.get("id")
+                .and_then(|v| v.as_str())
+                .map(|id| scope.contains(id))
+                .unwrap_or(false)
+        })
+        .collect();
+
+    let notes: Vec<Value> = obj
+        .get("notes")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|n| row_in_deck_scope(n, "deck_id", scope))
+        .collect();
+
+    let note_ids: HashSet<String> = notes
+        .iter()
+        .filter_map(|n| n.get("id").and_then(|v| v.as_str()).map(str::to_string))
+        .collect();
+
+    let note_type_ids: HashSet<String> = notes
+        .iter()
+        .filter_map(|n| {
+            n.get("note_type_id")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        })
+        .collect();
+
+    let cards: Vec<Value> = obj
+        .get("cards")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|c| {
+            c.get("note_id")
+                .and_then(|v| v.as_str())
+                .map(|id| note_ids.contains(id))
+                .unwrap_or(false)
+        })
+        .collect();
+
+    let card_ids: HashSet<String> = cards
+        .iter()
+        .filter_map(|c| c.get("id").and_then(|v| v.as_str()).map(str::to_string))
+        .collect();
+
+    let note_tags: Vec<Value> = obj
+        .get("note_tags")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|nt| {
+            nt.get("note_id")
+                .and_then(|v| v.as_str())
+                .map(|id| note_ids.contains(id))
+                .unwrap_or(false)
+        })
+        .collect();
+
+    let tag_ids: HashSet<String> = note_tags
+        .iter()
+        .filter_map(|nt| nt.get("tag_id").and_then(|v| v.as_str()).map(str::to_string))
+        .collect();
+
+    let tags: Vec<Value> = obj
+        .get("tags")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|t| {
+            t.get("id")
+                .and_then(|v| v.as_str())
+                .map(|id| tag_ids.contains(id))
+                .unwrap_or(false)
+        })
+        .collect();
+
+    let note_links: Vec<Value> = obj
+        .get("note_links")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|nl| {
+            let src = nl
+                .get("source_note_id")
+                .and_then(|v| v.as_str())
+                .map(|id| note_ids.contains(id))
+                .unwrap_or(false);
+            let tgt = nl
+                .get("target_note_id")
+                .and_then(|v| v.as_str())
+                .map(|id| note_ids.contains(id))
+                .unwrap_or(false);
+            src && tgt
+        })
+        .collect();
+
+    let card_triples: Vec<Value> = obj
+        .get("card_triples")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|ct| {
+            ct.get("card_id")
+                .and_then(|v| v.as_str())
+                .map(|id| card_ids.contains(id))
+                .unwrap_or(false)
+        })
+        .collect();
+
+    let triple_ids: HashSet<String> = card_triples
+        .iter()
+        .filter_map(|ct| ct.get("triple_id").and_then(|v| v.as_str()).map(str::to_string))
+        .collect();
+
+    let triples: Vec<Value> = obj
+        .get("triples")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|t| {
+            t.get("id")
+                .and_then(|v| v.as_str())
+                .map(|id| triple_ids.contains(id))
+                .unwrap_or(false)
+        })
+        .collect();
+
+    let entity_ids: HashSet<String> = triples
+        .iter()
+        .flat_map(|t| {
+            [
+                t.get("subject_id").and_then(|v| v.as_str()),
+                t.get("object_id").and_then(|v| v.as_str()),
+            ]
+        })
+        .flatten()
+        .map(str::to_string)
+        .collect();
+
+    let relation_type_ids: HashSet<String> = triples
+        .iter()
+        .filter_map(|t| {
+            t.get("relation_type_id")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        })
+        .collect();
+
+    let entities: Vec<Value> = obj
+        .get("entities")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|e| {
+            e.get("id")
+                .and_then(|v| v.as_str())
+                .map(|id| entity_ids.contains(id))
+                .unwrap_or(false)
+        })
+        .collect();
+
+    let relation_types: Vec<Value> = obj
+        .get("relation_types")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|rt| {
+            rt.get("id")
+                .and_then(|v| v.as_str())
+                .map(|id| relation_type_ids.contains(id))
+                .unwrap_or(false)
+        })
+        .collect();
+
+    let entity_tags: Vec<Value> = obj
+        .get("entity_tags")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|et| {
+            et.get("entity_id")
+                .and_then(|v| v.as_str())
+                .map(|id| entity_ids.contains(id))
+                .unwrap_or(false)
+        })
+        .collect();
+
+    let relation_type_tags: Vec<Value> = obj
+        .get("relation_type_tags")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|rtt| {
+            rtt.get("relation_type_id")
+                .and_then(|v| v.as_str())
+                .map(|id| relation_type_ids.contains(id))
+                .unwrap_or(false)
+        })
+        .collect();
+
+    let note_types: Vec<Value> = obj
+        .get("note_types")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|nt| {
+            nt.get("id")
+                .and_then(|v| v.as_str())
+                .map(|id| note_type_ids.contains(id))
+                .unwrap_or(false)
+        })
+        .collect();
+
+    let fields: Vec<Value> = obj
+        .get("fields")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|f| {
+            f.get("note_type_id")
+                .and_then(|v| v.as_str())
+                .map(|id| note_type_ids.contains(id))
+                .unwrap_or(false)
+        })
+        .collect();
+
+    let card_templates: Vec<Value> = obj
+        .get("card_templates")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|ct| {
+            ct.get("note_type_id")
+                .and_then(|v| v.as_str())
+                .map(|id| note_type_ids.contains(id))
+                .unwrap_or(false)
+        })
+        .collect();
+
+    obj.insert("decks".into(), Value::Array(decks));
+    obj.insert("note_types".into(), Value::Array(note_types));
+    obj.insert("fields".into(), Value::Array(fields));
+    obj.insert("card_templates".into(), Value::Array(card_templates));
+    obj.insert("notes".into(), Value::Array(notes));
+    obj.insert("cards".into(), Value::Array(cards));
+    obj.insert("tags".into(), Value::Array(tags));
+    obj.insert("note_tags".into(), Value::Array(note_tags));
+    obj.insert("note_links".into(), Value::Array(note_links));
+    obj.insert("entities".into(), Value::Array(entities));
+    obj.insert("relation_types".into(), Value::Array(relation_types));
+    obj.insert("triples".into(), Value::Array(triples));
+    obj.insert("card_triples".into(), Value::Array(card_triples));
+    obj.insert("entity_tags".into(), Value::Array(entity_tags));
+    obj.insert(
+        "relation_type_tags".into(),
+        Value::Array(relation_type_tags),
+    );
+
+    Value::Object(obj)
+}
+
+fn rollup_note_counts(
+    deck_ids: &[String],
+    parent_of: &HashMap<String, Option<String>>,
+    direct: &HashMap<String, usize>,
+) -> HashMap<String, usize> {
+    let direct_tuples: HashMap<String, (i64, i64, i64)> = direct
+        .iter()
+        .map(|(id, &n)| (id.clone(), (n as i64, 0, 0)))
+        .collect();
+    rollup_deck_counts(deck_ids, parent_of, &direct_tuples)
+        .into_iter()
+        .map(|(id, (n, _, _))| (id, n as usize))
+        .collect()
+}
+
+pub fn list_decks_from_payload(data: &Value) -> Result<Vec<ContentDeckPreview>, String> {
+    let format = data
+        .get("format")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing format field")?;
+    if format != FORMAT_CONTENT_V1 && format != FORMAT_LEGACY_BACKUP_V1 {
+        return Err(format!("Unsupported export format: {format}"));
+    }
+
+    let decks = data
+        .get("decks")
+        .and_then(|v| v.as_array())
+        .ok_or("Missing decks array")?;
+
+    let mut direct_notes: HashMap<String, usize> = HashMap::new();
+    if let Some(notes) = data.get("notes").and_then(|v| v.as_array()) {
+        for note in notes {
+            if let Some(deck_id) = note.get("deck_id").and_then(|v| v.as_str()) {
+                *direct_notes.entry(deck_id.to_string()).or_default() += 1;
+            }
+        }
+    }
+
+    let mut deck_ids = Vec::new();
+    let mut parent_of: HashMap<String, Option<String>> = HashMap::new();
+    for deck in decks {
+        let id = deck
+            .get("id")
+            .and_then(|v| v.as_str())
+            .ok_or("Deck missing id")?
+            .to_string();
+        let parent_id = deck.get("parent_id").and_then(|v| {
+            if v.is_null() {
+                None
+            } else {
+                v.as_str().map(str::to_string)
+            }
+        });
+        deck_ids.push(id.clone());
+        parent_of.insert(id, parent_id);
+    }
+    let note_count_by_deck = rollup_note_counts(&deck_ids, &parent_of, &direct_notes);
+
+    let mut out = Vec::new();
+    for deck in decks {
+        let id = deck
+            .get("id")
+            .and_then(|v| v.as_str())
+            .ok_or("Deck missing id")?
+            .to_string();
+        let name = deck
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("(unnamed)")
+            .to_string();
+        let parent_id = parent_of.get(&id).cloned().flatten();
+        out.push(ContentDeckPreview {
+            note_count: note_count_by_deck.get(&id).copied().unwrap_or(0),
+            id,
+            name,
+            parent_id,
+        });
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(out)
+}
+
+pub fn build_content_payload(
+    conn: &Connection,
+    selected_deck_ids: Option<&[String]>,
+) -> Result<Value, String> {
+    let payload = build_content_payload_unfiltered(conn)?;
+    if let Some(scope) = resolve_deck_scope(conn, selected_deck_ids)? {
+        Ok(filter_content_payload(payload, &scope))
+    } else {
+        Ok(payload)
+    }
+}
+
+fn build_content_payload_unfiltered(conn: &Connection) -> Result<Value, String> {
     let decks = fetch_rows(conn, "SELECT * FROM decks ORDER BY created_at")?;
     let note_types = fetch_rows(conn, "SELECT * FROM note_types ORDER BY created_at")?;
     let fields = fetch_rows(conn, "SELECT * FROM fields ORDER BY note_type_id, ordinal")?;
@@ -273,7 +772,11 @@ fn import_cards(
     Ok(())
 }
 
-pub fn import_content_payload(conn: &Connection, data: &Value) -> Result<ContentImportSummary, String> {
+pub fn import_content_payload(
+    conn: &Connection,
+    data: &Value,
+    selected_deck_ids: Option<&[String]>,
+) -> Result<ContentImportSummary, String> {
     let format = data
         .get("format")
         .and_then(|v| v.as_str())
@@ -281,6 +784,12 @@ pub fn import_content_payload(conn: &Connection, data: &Value) -> Result<Content
     if format != FORMAT_CONTENT_V1 && format != FORMAT_LEGACY_BACKUP_V1 {
         return Err(format!("Unsupported export format: {format}"));
     }
+
+    let data = if let Some(scope) = resolve_deck_scope_from_payload(&data, selected_deck_ids) {
+        filter_content_payload(data.clone(), &scope)
+    } else {
+        data.clone()
+    };
 
     let mut summary = ContentImportSummary::default();
     let tx = conn
@@ -414,8 +923,325 @@ pub fn import_content_payload(conn: &Connection, data: &Value) -> Result<Content
     Ok(summary)
 }
 
-pub fn export_content_json_file(conn: &Connection, file_path: &str) -> Result<ContentExportSummary, String> {
-    let payload = build_content_payload(conn)?;
+fn fetch_rows_where_in(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    ids: &[String],
+) -> Result<Vec<Value>, String> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
+    let sql = format!("SELECT * FROM {table} WHERE {column} IN ({placeholders})");
+    fetch_rows_with_params(conn, &sql, ids)
+}
+
+fn fetch_rows_with_params(
+    conn: &Connection,
+    sql: &str,
+    params: &[String],
+) -> Result<Vec<Value>, String> {
+    let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
+    let columns: Vec<String> = stmt
+        .column_names()
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let sql_params: Vec<SqlValue> = params.iter().map(|s| SqlValue::Text(s.clone())).collect();
+    let rows = stmt
+        .query_map(rusqlite::params_from_iter(sql_params.iter()), |row| {
+            row_to_json(row, &columns)
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    Ok(rows)
+}
+
+fn scoped_card_ids_from_content(content: &Value) -> Vec<String> {
+    content
+        .get("cards")
+        .and_then(|v| v.as_array())
+        .map(|cards| {
+            cards
+                .iter()
+                .filter_map(|c| c.get("id").and_then(|v| v.as_str()).map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn insert_rows_or_replace(
+    conn: &Connection,
+    table: &str,
+    rows: &[Value],
+) -> Result<(), String> {
+    for row in rows {
+        let obj = row
+            .as_object()
+            .ok_or_else(|| format!("Invalid row in {table}"))?;
+        if obj.is_empty() {
+            continue;
+        }
+        let cols: Vec<&str> = obj.keys().map(|k| k.as_str()).collect();
+        let placeholders: Vec<String> = (1..=cols.len()).map(|i| format!("?{i}")).collect();
+        let sql = format!(
+            "INSERT OR REPLACE INTO {table} ({}) VALUES ({})",
+            cols.join(", "),
+            placeholders.join(", ")
+        );
+        let params: Vec<SqlValue> = cols
+            .iter()
+            .map(|c| json_value_to_sql(obj.get(*c).unwrap_or(&Value::Null)))
+            .collect();
+        conn.execute(&sql, rusqlite::params_from_iter(params.iter()))
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Capture a deck subtree (and study state) before deletion so it can be restored.
+pub fn build_deck_delete_snapshot(conn: &Connection, root_id: &str) -> Result<Value, String> {
+    let mut content = build_content_payload(conn, Some(&[root_id.to_string()]))?;
+    let card_ids = scoped_card_ids_from_content(&content);
+
+    if !card_ids.is_empty() {
+        content["cards"] = Value::Array(fetch_rows_where_in(conn, "cards", "id", &card_ids)?);
+    }
+
+    let card_progress = fetch_rows_where_in(conn, "card_progress", "card_id", &card_ids)?;
+    let review_log = fetch_rows_where_in(conn, "review_log", "card_id", &card_ids)?;
+    let card_flags = fetch_rows_where_in(conn, "card_flags", "card_id", &card_ids)?;
+
+    Ok(json!({
+        "format": FORMAT_DECK_UNDO_V1,
+        "root_deck_id": root_id,
+        "content": content,
+        "card_progress": card_progress,
+        "review_log": review_log,
+        "card_flags": card_flags,
+    }))
+}
+
+/// Restore a deck subtree previously captured by [`build_deck_delete_snapshot`].
+pub fn restore_deck_delete_snapshot(conn: &Connection, snapshot: &Value) -> Result<(), String> {
+    let format = snapshot
+        .get("format")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing format field")?;
+    if format != FORMAT_DECK_UNDO_V1 {
+        return Err(format!("Unsupported deck undo format: {format}"));
+    }
+
+    let content = snapshot
+        .get("content")
+        .ok_or("Missing content in deck undo snapshot")?;
+
+    let mut summary = ContentImportSummary::default();
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| e.to_string())?;
+
+    let decks = content
+        .get("decks")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let sorted_decks = sort_decks_parent_first(&decks);
+
+    let _ = insert_rows(
+        &tx,
+        "note_types",
+        content
+            .get("note_types")
+            .and_then(|v| v.as_array())
+            .map(|a| a.as_slice())
+            .unwrap_or(&[]),
+        &mut summary,
+    )?;
+    let _ = insert_rows(
+        &tx,
+        "fields",
+        content
+            .get("fields")
+            .and_then(|v| v.as_array())
+            .map(|a| a.as_slice())
+            .unwrap_or(&[]),
+        &mut summary,
+    )?;
+    let _ = insert_rows(
+        &tx,
+        "card_templates",
+        content
+            .get("card_templates")
+            .and_then(|v| v.as_array())
+            .map(|a| a.as_slice())
+            .unwrap_or(&[]),
+        &mut summary,
+    )?;
+    let _ = insert_rows(&tx, "decks", &sorted_decks, &mut summary)?;
+    let _ = insert_rows(
+        &tx,
+        "tags",
+        content
+            .get("tags")
+            .and_then(|v| v.as_array())
+            .map(|a| a.as_slice())
+            .unwrap_or(&[]),
+        &mut summary,
+    )?;
+    let _ = insert_rows(
+        &tx,
+        "entities",
+        content
+            .get("entities")
+            .and_then(|v| v.as_array())
+            .map(|a| a.as_slice())
+            .unwrap_or(&[]),
+        &mut summary,
+    )?;
+    let _ = insert_rows(
+        &tx,
+        "relation_types",
+        content
+            .get("relation_types")
+            .and_then(|v| v.as_array())
+            .map(|a| a.as_slice())
+            .unwrap_or(&[]),
+        &mut summary,
+    )?;
+    let _ = insert_rows(
+        &tx,
+        "notes",
+        content
+            .get("notes")
+            .and_then(|v| v.as_array())
+            .map(|a| a.as_slice())
+            .unwrap_or(&[]),
+        &mut summary,
+    )?;
+
+    let cards = content
+        .get("cards")
+        .and_then(|v| v.as_array())
+        .map(|a| a.as_slice())
+        .unwrap_or(&[]);
+    let _ = insert_rows(&tx, "cards", cards, &mut summary)?;
+
+    let _ = insert_rows(
+        &tx,
+        "note_tags",
+        content
+            .get("note_tags")
+            .and_then(|v| v.as_array())
+            .map(|a| a.as_slice())
+            .unwrap_or(&[]),
+        &mut summary,
+    )?;
+    let _ = insert_rows(
+        &tx,
+        "note_links",
+        content
+            .get("note_links")
+            .and_then(|v| v.as_array())
+            .map(|a| a.as_slice())
+            .unwrap_or(&[]),
+        &mut summary,
+    )?;
+    let _ = insert_rows(
+        &tx,
+        "triples",
+        content
+            .get("triples")
+            .and_then(|v| v.as_array())
+            .map(|a| a.as_slice())
+            .unwrap_or(&[]),
+        &mut summary,
+    )?;
+    let _ = insert_rows(
+        &tx,
+        "card_triples",
+        content
+            .get("card_triples")
+            .and_then(|v| v.as_array())
+            .map(|a| a.as_slice())
+            .unwrap_or(&[]),
+        &mut summary,
+    )?;
+    let _ = insert_rows(
+        &tx,
+        "entity_tags",
+        content
+            .get("entity_tags")
+            .and_then(|v| v.as_array())
+            .map(|a| a.as_slice())
+            .unwrap_or(&[]),
+        &mut summary,
+    )?;
+    let _ = insert_rows(
+        &tx,
+        "relation_type_tags",
+        content
+            .get("relation_type_tags")
+            .and_then(|v| v.as_array())
+            .map(|a| a.as_slice())
+            .unwrap_or(&[]),
+        &mut summary,
+    )?;
+
+    let card_ids = scoped_card_ids_from_content(content);
+    if !card_ids.is_empty() {
+        let placeholders = card_ids.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
+        let sql = format!("DELETE FROM card_progress WHERE card_id IN ({placeholders})");
+        let params: Vec<SqlValue> = card_ids.iter().map(|s| SqlValue::Text(s.clone())).collect();
+        tx.execute(&sql, rusqlite::params_from_iter(params.iter()))
+            .map_err(|e| e.to_string())?;
+    }
+
+    tx.commit().map_err(|e| e.to_string())?;
+
+    insert_rows_or_replace(
+        conn,
+        "card_progress",
+        snapshot
+            .get("card_progress")
+            .and_then(|v| v.as_array())
+            .map(|a| a.as_slice())
+            .unwrap_or(&[]),
+    )?;
+    let _ = insert_rows(
+        conn,
+        "review_log",
+        snapshot
+            .get("review_log")
+            .and_then(|v| v.as_array())
+            .map(|a| a.as_slice())
+            .unwrap_or(&[]),
+        &mut summary,
+    );
+    let _ = insert_rows(
+        conn,
+        "card_flags",
+        snapshot
+            .get("card_flags")
+            .and_then(|v| v.as_array())
+            .map(|a| a.as_slice())
+            .unwrap_or(&[]),
+        &mut summary,
+    );
+
+    let _ = ensure_search_index_conn(conn);
+
+    Ok(())
+}
+
+pub fn export_content_json_file(
+    conn: &Connection,
+    file_path: &str,
+    selected_deck_ids: Option<&[String]>,
+) -> Result<ContentExportSummary, String> {
+    let payload = build_content_payload(conn, selected_deck_ids)?;
     let json_str = serde_json::to_string_pretty(&payload).map_err(|e| e.to_string())?;
     fs::write(file_path, json_str).map_err(|e| e.to_string())?;
 
@@ -429,15 +1255,118 @@ pub fn export_content_json_file(conn: &Connection, file_path: &str) -> Result<Co
     })
 }
 
-pub fn import_content_file(conn: &Connection, file_path: &str) -> Result<ContentImportSummary, String> {
+pub fn preview_content_import_file(file_path: &str) -> Result<Vec<ContentDeckPreview>, String> {
     let data = read_content_json_file(Path::new(file_path))?;
-    import_content_payload(conn, &data)
+    list_decks_from_payload(&data)
+}
+
+pub fn import_content_file(
+    conn: &Connection,
+    file_path: &str,
+    selected_deck_ids: Option<&[String]>,
+) -> Result<ContentImportSummary, String> {
+    let data = read_content_json_file(Path::new(file_path))?;
+    import_content_payload(conn, &data, selected_deck_ids)
+}
+
+pub fn list_export_decks(conn: &Connection) -> Result<Vec<ContentDeckPreview>, String> {
+    let decks = fetch_rows(conn, "SELECT * FROM decks ORDER BY name")?;
+
+    let mut direct_notes: HashMap<String, usize> = HashMap::new();
+    let mut stmt = conn
+        .prepare("SELECT deck_id, COUNT(*) FROM notes GROUP BY deck_id")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as usize))
+        })
+        .map_err(|e| e.to_string())?;
+    for row in rows {
+        let (id, count) = row.map_err(|e| e.to_string())?;
+        direct_notes.insert(id, count);
+    }
+
+    let mut deck_ids = Vec::new();
+    let mut parent_of: HashMap<String, Option<String>> = HashMap::new();
+    for deck in &decks {
+        let obj = deck.as_object().ok_or("Invalid deck row")?;
+        let id = obj
+            .get("id")
+            .and_then(|v| v.as_str())
+            .ok_or("Deck missing id")?
+            .to_string();
+        let parent_id = obj.get("parent_id").and_then(|v| {
+            if v.is_null() {
+                None
+            } else {
+                v.as_str().map(str::to_string)
+            }
+        });
+        deck_ids.push(id.clone());
+        parent_of.insert(id, parent_id);
+    }
+    let note_count_by_deck = rollup_note_counts(&deck_ids, &parent_of, &direct_notes);
+
+    let mut out = Vec::new();
+    for deck in decks {
+        let obj = deck.as_object().ok_or("Invalid deck row")?;
+        let id = obj
+            .get("id")
+            .and_then(|v| v.as_str())
+            .ok_or("Deck missing id")?
+            .to_string();
+        let name = obj
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("(unnamed)")
+            .to_string();
+        let parent_id = parent_of.get(&id).cloned().flatten();
+        out.push(ContentDeckPreview {
+            note_count: note_count_by_deck.get(&id).copied().unwrap_or(0),
+            id,
+            name,
+            parent_id,
+        });
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::db::Database;
+
+    #[test]
+    fn list_export_decks_rollup_includes_subdecks() {
+        let db = Database::in_memory().unwrap();
+        let conn = db.conn.lock().unwrap();
+        let now = chrono::Utc::now().timestamp();
+
+        conn.execute(
+            "INSERT INTO decks (id, name, description, new_per_day, max_reviews, created_at, updated_at)
+             VALUES ('dk_parent', 'Chemistry', '', 20, 200, ?1, ?1)",
+            [now],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO decks (id, name, parent_id, description, new_per_day, max_reviews, created_at, updated_at)
+             VALUES ('dk_child', 'Polyatomic Ions', 'dk_parent', '', 20, 200, ?1, ?1)",
+            [now],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO notes (id, deck_id, note_type_id, fields_json, created_at, updated_at)
+             VALUES ('n1', 'dk_child', 'nt_basic', '{}', ?1, ?1)",
+            [now],
+        )
+        .unwrap();
+
+        let decks = list_export_decks(&conn).unwrap();
+        let parent = decks.iter().find(|d| d.id == "dk_parent").unwrap();
+        let child = decks.iter().find(|d| d.id == "dk_child").unwrap();
+        assert_eq!(child.note_count, 1);
+        assert_eq!(parent.note_count, 1);
+    }
 
     #[test]
     fn content_export_import_roundtrip() {
@@ -467,14 +1396,14 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("content.json");
-        export_content_json_file(&conn, path.to_str().unwrap()).unwrap();
+        export_content_json_file(&conn, path.to_str().unwrap(), None).unwrap();
 
         conn.execute("DELETE FROM card_progress", []).unwrap();
         conn.execute("DELETE FROM cards", []).unwrap();
         conn.execute("DELETE FROM notes", []).unwrap();
         conn.execute("DELETE FROM decks", []).unwrap();
 
-        let summary = import_content_file(&conn, path.to_str().unwrap()).unwrap();
+        let summary = import_content_file(&conn, path.to_str().unwrap(), None).unwrap();
         assert_eq!(summary.decks_added, 1);
         assert_eq!(summary.notes_added, 1);
         assert_eq!(summary.cards_added, 1);

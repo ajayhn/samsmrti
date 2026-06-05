@@ -1,9 +1,11 @@
+use crate::commands::window_profiles::{
+    sync_window_titles_and_menu_from_command, WindowProfiles,
+};
 use crate::db::card_progress;
 use crate::db::Database;
 use rusqlite::Connection;
 use serde::Serialize;
-use std::sync::Mutex;
-use tauri::State;
+use tauri::{Manager, State, WebviewWindow};
 
 pub const ADMIN_PROFILE_ID: &str = "profile_admin";
 const ACTIVE_PROFILE_KEY: &str = "active_profile_id";
@@ -40,6 +42,15 @@ pub fn load_active_profile_from_db(conn: &Connection) -> Result<ActiveProfile, S
         .map_err(|e| e.to_string())?;
 
     Ok(ActiveProfile { id, is_admin })
+}
+
+pub fn profile_display_name(conn: &Connection, profile_id: &str) -> Result<String, String> {
+    conn.query_row(
+        "SELECT display_name FROM profiles WHERE id = ?1",
+        [profile_id],
+        |row| row.get(0),
+    )
+    .map_err(|e| e.to_string())
 }
 
 pub fn persist_active_profile(conn: &Connection, profile_id: &str) -> Result<(), String> {
@@ -80,13 +91,14 @@ pub fn list_profiles(db: State<Database>) -> Result<Vec<Profile>, String> {
 #[tauri::command]
 pub fn get_active_profile(
     db: State<Database>,
-    active: State<'_, Mutex<ActiveProfile>>,
+    window: WebviewWindow,
+    profiles: State<'_, WindowProfiles>,
 ) -> Result<Profile, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let active_guard = active.lock().map_err(|e| e.to_string())?;
+    let active = profiles.for_window(&window)?;
     conn.query_row(
         "SELECT id, display_name, is_admin, created_at FROM profiles WHERE id = ?1",
-        [&active_guard.id],
+        [&active.id],
         row_to_profile,
     )
     .map_err(|e| e.to_string())
@@ -95,23 +107,33 @@ pub fn get_active_profile(
 #[tauri::command]
 pub fn set_active_profile(
     db: State<Database>,
-    active: State<'_, Mutex<ActiveProfile>>,
+    window: WebviewWindow,
+    profiles: State<'_, WindowProfiles>,
     profile_id: String,
 ) -> Result<Profile, String> {
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let profile = conn
-        .query_row(
-            "SELECT id, display_name, is_admin, created_at FROM profiles WHERE id = ?1",
-            [&profile_id],
-            row_to_profile,
-        )
-        .map_err(|_| "Profile not found".to_string())?;
+    let profile = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let profile = conn
+            .query_row(
+                "SELECT id, display_name, is_admin, created_at FROM profiles WHERE id = ?1",
+                [&profile_id],
+                row_to_profile,
+            )
+            .map_err(|_| "Profile not found".to_string())?;
 
-    persist_active_profile(&conn, &profile_id)?;
+        persist_active_profile(&conn, &profile_id)?;
+        profile
+    };
 
-    let mut active_guard = active.lock().map_err(|e| e.to_string())?;
-    active_guard.id = profile.id.clone();
-    active_guard.is_admin = profile.is_admin;
+    profiles.set_for_window(
+        &window,
+        ActiveProfile {
+            id: profile.id.clone(),
+            is_admin: profile.is_admin,
+        },
+    );
+
+    sync_window_titles_and_menu_from_command(window.app_handle());
 
     Ok(profile)
 }
@@ -156,42 +178,39 @@ pub fn create_profile(
 #[tauri::command]
 pub fn delete_profile(
     db: State<Database>,
-    active: State<'_, Mutex<ActiveProfile>>,
+    window: WebviewWindow,
+    profiles: State<'_, WindowProfiles>,
     profile_id: String,
 ) -> Result<(), String> {
     if profile_id == ADMIN_PROFILE_ID {
         return Err("Cannot delete the Admin profile".to_string());
     }
 
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let fallback = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
 
-    let total: i64 = conn
-        .query_row("SELECT COUNT(*) FROM profiles", [], |row| row.get(0))
-        .map_err(|e| e.to_string())?;
-    if total <= 1 {
-        return Err("Cannot delete the last profile".to_string());
-    }
+        let total: i64 = conn
+            .query_row("SELECT COUNT(*) FROM profiles", [], |row| row.get(0))
+            .map_err(|e| e.to_string())?;
+        if total <= 1 {
+            return Err("Cannot delete the last profile".to_string());
+        }
 
-    let exists: bool = conn
-        .query_row(
-            "SELECT COUNT(*) FROM profiles WHERE id = ?1",
-            [&profile_id],
-            |row| row.get::<_, i64>(0),
-        )
-        .map_err(|e| e.to_string())?
-        > 0;
-    if !exists {
-        return Err("Profile not found".to_string());
-    }
+        let exists: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM profiles WHERE id = ?1",
+                [&profile_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(|e| e.to_string())?
+            > 0;
+        if !exists {
+            return Err("Profile not found".to_string());
+        }
 
-    let active_guard = active.lock().map_err(|e| e.to_string())?;
-    let deleting_active = active_guard.id == profile_id;
-    drop(active_guard);
+        conn.execute("DELETE FROM profiles WHERE id = ?1", [&profile_id])
+            .map_err(|e| e.to_string())?;
 
-    conn.execute("DELETE FROM profiles WHERE id = ?1", [&profile_id])
-        .map_err(|e| e.to_string())?;
-
-    if deleting_active {
         let fallback_id: String = conn
             .query_row(
                 "SELECT id FROM profiles WHERE is_admin = 0 ORDER BY created_at ASC LIMIT 1",
@@ -208,7 +227,6 @@ pub fn delete_profile(
             .map_err(|e| e.to_string())?;
 
         persist_active_profile(&conn, &fallback_id)?;
-        let mut active_guard = active.lock().map_err(|e| e.to_string())?;
         let is_admin: bool = conn
             .query_row(
                 "SELECT is_admin FROM profiles WHERE id = ?1",
@@ -216,9 +234,16 @@ pub fn delete_profile(
                 |row| Ok(row.get::<_, i64>(0)? != 0),
             )
             .map_err(|e| e.to_string())?;
-        active_guard.id = fallback_id;
-        active_guard.is_admin = is_admin;
-    }
+
+        ActiveProfile {
+            id: fallback_id,
+            is_admin,
+        }
+    };
+
+    profiles.replace_profile_id(&profile_id, fallback);
+
+    sync_window_titles_and_menu_from_command(window.app_handle());
 
     Ok(())
 }

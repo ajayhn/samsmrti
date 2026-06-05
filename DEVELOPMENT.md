@@ -18,6 +18,8 @@ npm run tauri dev
 
 This starts the Vite dev server and the Tauri shell with hot reload for the frontend.
 
+**File → New Window** opens another Samsmrti window. Each window keeps its own UI state (review session, browse filters, etc.) and its own **active profile**—switching profile in one window does not change the other. All windows share the same database (decks, notes, cards).
+
 ### Frontend only
 
 ```bash
@@ -105,6 +107,26 @@ Contains `samsmrti.db` and `media/`. Prefer in-app **Backup (Full)** / **Restore
 ### Version and product name
 
 Set in `src-tauri/tauri.conf.json` (`version`, `productName`) and `src-tauri/Cargo.toml` (`version`) before release builds.
+
+### App icon
+
+Desktop icons live in `src-tauri/icons/` (`.icns`, `.ico`, PNG sizes). The web favicon is `public/icon.svg` (with `public/favicon.png` for Apple touch).
+
+To regenerate from a new **square** PNG (1024×1024 recommended):
+
+```bash
+cargo tauri icon path/to/icon.png -o src-tauri/icons
+```
+
+Dock icons look best with ~20% transparent margin around the artwork (same visual weight as Cursor). When updating the master PNG, scale the graphic to **80%** and center it on a square canvas before running `tauri icon`.
+
+After changing icons you must **recompile the Rust app** (icons are baked in at build time). Quit Samsmrti, then:
+
+```bash
+npm run tauri dev
+```
+
+A plain quit/reopen without recompiling will keep the old dock icon. For a packaged `.app`, run `npm run tauri build` and open the bundle under `src-tauri/target/release/bundle/`.
 
 ## Related docs
 

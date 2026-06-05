@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { useDeckStore } from "../../stores/deckStore";
+import { filterInputProps } from "../../lib/filterInput";
 import type { DeckWithCounts } from "../../lib/tauri";
 
 interface DeckSettingsProps {
@@ -73,6 +74,8 @@ export function DeckSettings({ deck, onClose }: DeckSettingsProps) {
             value={name}
             onChange={(e) => setName(e.target.value)}
             className="w-full px-3 py-2 bg-surface-alt border border-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary-500"
+            name="samsmrti-deck-name"
+            {...filterInputProps}
           />
         </div>
 

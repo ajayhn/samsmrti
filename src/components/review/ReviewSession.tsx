@@ -14,18 +14,10 @@ import {
 } from "../../lib/cloze";
 import { useDeckStore } from "../../stores/deckStore";
 import { api, type ReviewStats } from "../../lib/tauri";
+import { NoteTagsPanel } from "../notes/NoteTagsPanel";
 import { ReviewNoteEditor } from "./ReviewNoteEditor";
 import { isNativeEditShortcut } from "../../lib/keyboard";
-
-function isTypingTarget(target: EventTarget | null): boolean {
-  if (!target || !(target instanceof HTMLElement)) return false;
-  const tag = target.tagName;
-  return (
-    tag === "INPUT" ||
-    tag === "TEXTAREA" ||
-    target.isContentEditable
-  );
-}
+import { isTypingTarget } from "../../lib/isTypingTarget";
 
 const RATING_LABELS = ["Again", "Hard", "Good", "Easy"] as const;
 const RATING_KEYS = ["1", "2", "3", "4"];
@@ -72,6 +64,8 @@ export function ReviewSession() {
   const [stats, setStats] = useState<ReviewStats | null>(null);
   const [editOpen, setEditOpen] = useState(false);
   const [revealStep, setRevealStep] = useState(0);
+  const [isFlagged, setIsFlagged] = useState(false);
+  const [flagging, setFlagging] = useState(false);
 
   const card = currentCard();
   const sessionDone = !sessionActive || !card;
@@ -83,6 +77,17 @@ export function ReviewSession() {
 
   useEffect(() => {
     setRevealStep(0);
+  }, [card?.card_id]);
+
+  useEffect(() => {
+    if (!card?.card_id) {
+      setIsFlagged(false);
+      return;
+    }
+    api
+      .getCardFlag(card.card_id)
+      .then(setIsFlagged)
+      .catch(() => setIsFlagged(false));
   }, [card?.card_id]);
 
   const handleReveal = useCallback(() => {
@@ -138,6 +143,18 @@ export function ReviewSession() {
     fetchDecks();
   }, [deleteCard, fetchDecks]);
 
+  const handleFlag = useCallback(async () => {
+    if (!card || flagging) return;
+    const next = !isFlagged;
+    setFlagging(true);
+    try {
+      await api.setCardFlag(card.card_id, next);
+      setIsFlagged(next);
+    } finally {
+      setFlagging(false);
+    }
+  }, [card, flagging, isFlagged]);
+
   const handleUndo = useCallback(async () => {
     await undoLast();
     fetchDecks();
@@ -185,6 +202,15 @@ export function ReviewSession() {
       } else if (e.key === "9") {
         e.preventDefault();
         handleBury();
+      } else if (
+        e.key.toLowerCase() === "f" &&
+        !e.ctrlKey &&
+        !e.metaKey &&
+        !e.altKey &&
+        !isTypingTarget(e.target)
+      ) {
+        e.preventDefault();
+        handleFlag();
       } else if (e.key.toLowerCase() === "d") {
         e.preventDefault();
         handleDelete();
@@ -206,6 +232,7 @@ export function ReviewSession() {
       handleReveal,
       handleAnswer,
       handleBury,
+      handleFlag,
       handleDelete,
       endSession,
       navigate,
@@ -389,6 +416,15 @@ export function ReviewSession() {
             >
               {card.state}
             </span>
+            {isFlagged && (
+              <span className="text-xs px-2.5 py-1 rounded-full font-medium bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-200">
+                flag
+              </span>
+            )}
+          </div>
+
+          <div className="mt-4 w-full max-w-xl mx-auto text-left">
+            <NoteTagsPanel noteId={card.note_id} compact />
           </div>
 
           <div className="mt-5 space-y-3">
@@ -419,7 +455,7 @@ export function ReviewSession() {
               </div>
             )}
 
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-3 gap-3">
               <button
                 onClick={handleBury}
                 className="py-2.5 text-sm text-text-secondary border border-border rounded-xl hover:bg-surface-hover transition-colors cursor-pointer"
@@ -427,6 +463,19 @@ export function ReviewSession() {
               >
                 Bury
                 <kbd className="ml-1.5 text-[10px] font-semibold text-text-muted">9</kbd>
+              </button>
+              <button
+                onClick={handleFlag}
+                disabled={flagging}
+                className={`py-2.5 text-sm border rounded-xl transition-colors cursor-pointer disabled:cursor-default disabled:opacity-60 ${
+                  isFlagged
+                    ? "text-amber-800 dark:text-amber-200 border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-900/20 hover:bg-amber-100 dark:hover:bg-amber-900/30"
+                    : "text-text-secondary border-border hover:bg-surface-hover"
+                }`}
+                title={isFlagged ? "Remove flag from this card (F)" : "Flag this card (F)"}
+              >
+                {isFlagged ? "Unflag" : "Flag"}
+                <kbd className="ml-1.5 text-[10px] font-semibold text-text-muted">F</kbd>
               </button>
               <button
                 onClick={handleDelete}

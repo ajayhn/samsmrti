@@ -1,5 +1,7 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+import { isTypingTarget } from "../../lib/isTypingTarget";
 import { api, type Card, type NoteType } from "../../lib/tauri";
+import { NoteEditorDialog } from "../notes/NoteEditorDialog";
 import {
   countClozeDeletions,
   isProgressiveQuizbowlCard,
@@ -47,12 +49,23 @@ function CardPreviewPanel({
   card,
   index,
   total,
+  isFlagged,
+  flagging,
+  onFlag,
+  onEdit,
+  primaryContent = false,
 }: {
   noteType: NoteType;
   fields: Record<string, string>;
   card: Card;
   index: number;
   total: number;
+  isFlagged: boolean;
+  flagging: boolean;
+  onFlag: () => void;
+  onEdit: () => void;
+  /** First card: keyboard focus target for note text in View Cards. */
+  primaryContent?: boolean;
 }) {
   const [side, setSide] = useState<"front" | "back">("front");
   const [revealStep, setRevealStep] = useState(0);
@@ -103,6 +116,28 @@ function CardPreviewPanel({
           >
             Back
           </button>
+          <button
+            type="button"
+            onClick={onFlag}
+            disabled={flagging}
+            className={`px-2.5 py-1 transition-colors cursor-pointer border-l border-border disabled:cursor-default disabled:opacity-60 ${
+              isFlagged
+                ? "bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-200 hover:bg-amber-200/80 dark:hover:bg-amber-900/50"
+                : "text-text-secondary hover:bg-surface-hover"
+            }`}
+            title={isFlagged ? "Remove flag from this card" : "Flag this card"}
+          >
+            {isFlagged ? "Unflag" : "Flag"}
+          </button>
+          <button
+            type="button"
+            onClick={onEdit}
+            className="px-2.5 py-1 transition-colors cursor-pointer border-l border-border text-text-secondary hover:bg-surface-hover"
+            title="Edit note fields (E)"
+          >
+            Edit
+            <kbd className="ml-1 text-[9px] font-semibold text-text-muted/80">E</kbd>
+          </button>
         </div>
       </div>
 
@@ -138,7 +173,17 @@ function CardPreviewPanel({
       )}
 
       <div
-        className="p-4 text-sm text-text leading-relaxed whitespace-pre-wrap prose prose-sm prose-stone dark:prose-invert max-w-none"
+        {...(primaryContent
+          ? {
+              "data-study-preview-content": true,
+              tabIndex: -1,
+              className:
+                "p-4 text-sm text-text leading-relaxed whitespace-pre-wrap prose prose-sm prose-stone dark:prose-invert max-w-none outline-none focus:ring-2 focus:ring-primary-500/40 rounded-b-xl",
+            }
+          : {
+              className:
+                "p-4 text-sm text-text leading-relaxed whitespace-pre-wrap prose prose-sm prose-stone dark:prose-invert max-w-none",
+            })}
         dangerouslySetInnerHTML={{ __html: content }}
       />
     </div>
@@ -150,20 +195,93 @@ export function StudyCardPreview({
   noteTypeId,
   fields,
   noteTypes,
+  onFlagStateChange,
+  onNoteUpdated,
+  enableEditShortcut = false,
 }: {
   noteId: string;
   noteTypeId: string;
   fields: Record<string, string>;
   noteTypes: NoteType[];
+  /** Called when per-card flag state is loaded or toggled (`true` if any card is flagged). */
+  onFlagStateChange?: (anyFlagged: boolean) => void;
+  onNoteUpdated?: (
+    fields: Record<string, string>,
+    tags: string[]
+  ) => void;
+  /** Listen for E to open the editor (e.g. View Cards). */
+  enableEditShortcut?: boolean;
 }) {
   const [cards, setCards] = useState<Card[] | null>(null);
+  const [flaggedCardIds, setFlaggedCardIds] = useState<Record<string, boolean>>({});
+  const [flagging, setFlagging] = useState(false);
+  const [flaggingCardId, setFlaggingCardId] = useState<string | null>(null);
+  const [localFields, setLocalFields] = useState(fields);
+  const [editOpen, setEditOpen] = useState(false);
   const noteType = noteTypes.find((nt) => nt.id === noteTypeId);
+
+  useEffect(() => {
+    setLocalFields(fields);
+  }, [noteId, fields]);
+
+  const handleToggleFlag = useCallback(async (cardId: string) => {
+    if (flagging) return;
+    const next = !flaggedCardIds[cardId];
+    setFlagging(true);
+    setFlaggingCardId(cardId);
+    try {
+      await api.setCardFlag(cardId, next);
+      setFlaggedCardIds((prev) => ({ ...prev, [cardId]: next }));
+    } finally {
+      setFlagging(false);
+      setFlaggingCardId(null);
+    }
+  }, [flaggedCardIds, flagging]);
+
+  const openEdit = useCallback(() => setEditOpen(true), []);
+
+  useEffect(() => {
+    if (!enableEditShortcut) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (editOpen) {
+        if (e.key === "Escape") {
+          e.preventDefault();
+          setEditOpen(false);
+        }
+        return;
+      }
+      if (
+        e.key.toLowerCase() === "e" &&
+        !e.ctrlKey &&
+        !e.metaKey &&
+        !e.altKey &&
+        !isTypingTarget(e.target)
+      ) {
+        e.preventDefault();
+        openEdit();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [enableEditShortcut, editOpen, openEdit]);
+
+  useEffect(() => {
+    if (!onFlagStateChange || cards === null) return;
+    onFlagStateChange(Object.values(flaggedCardIds).some(Boolean));
+  }, [flaggedCardIds, cards, onFlagStateChange]);
 
   useEffect(() => {
     setCards(null);
     api
       .getCardsForNote(noteId)
-      .then((c) => setCards([...c].sort((a, b) => a.template_ordinal - b.template_ordinal)))
+      .then(async (c) => {
+        const sorted = [...c].sort((a, b) => a.template_ordinal - b.template_ordinal);
+        setCards(sorted);
+        const flags = await Promise.all(
+          sorted.map(async (card) => [card.id, await api.getCardFlag(card.id)] as const)
+        );
+        setFlaggedCardIds(Object.fromEntries(flags));
+      })
       .catch(() => setCards([]));
   }, [noteId]);
 
@@ -195,12 +313,31 @@ export function StudyCardPreview({
         <CardPreviewPanel
           key={card.id}
           noteType={noteType}
-          fields={fields}
+          fields={localFields}
           card={card}
           index={index}
           total={cards.length}
+          isFlagged={Boolean(flaggedCardIds[card.id])}
+          flagging={flagging && flaggingCardId === card.id}
+          onFlag={() => handleToggleFlag(card.id)}
+          onEdit={openEdit}
+          primaryContent={index === 0}
         />
       ))}
+
+      <NoteEditorDialog
+        note={{
+          note_id: noteId,
+          note_type_id: noteTypeId,
+          fields: localFields,
+        }}
+        open={editOpen}
+        onClose={() => setEditOpen(false)}
+        onSaved={(newFields, tags) => {
+          setLocalFields(newFields);
+          onNoteUpdated?.(newFields, tags);
+        }}
+      />
     </div>
   );
 }
