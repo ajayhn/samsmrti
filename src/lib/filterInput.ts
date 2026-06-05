@@ -6,14 +6,12 @@ import type { InputHTMLAttributes } from "react";
  */
 export const filterInputProps: Pick<
   InputHTMLAttributes<HTMLInputElement>,
-  | "autoComplete"
-  | "autoCorrect"
-  | "autoCapitalize"
-  | "spellCheck"
-  | "data-lpignore"
-  | "data-1p-ignore"
-  | "data-form-type"
-> = {
+  "autoComplete" | "autoCorrect" | "autoCapitalize" | "spellCheck"
+> & {
+  "data-lpignore"?: string;
+  "data-1p-ignore"?: string;
+  "data-form-type"?: string;
+} = {
   autoComplete: "off",
   autoCorrect: "off",
   autoCapitalize: "off",
