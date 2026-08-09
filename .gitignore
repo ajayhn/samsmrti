@@ -9,6 +9,7 @@ lerna-debug.log*
 
 node_modules
 dist
+dist-web
 dist-release
 dist-ssr
 *.local
@@ -42,6 +43,9 @@ media/
 
 # Tauri generated (regenerated on build)
 src-tauri/gen/
+
+# wasm-pack output for the web/PWA build (regenerated via `npm run build:wasm-core`)
+src/wasm-core/pkg/
 
 # Unused Vite template assets (icons in src-tauri/icons/ are committed)
 src/assets/*.png

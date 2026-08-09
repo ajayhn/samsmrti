@@ -8,7 +8,11 @@
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "build:wasm-core": "wasm-pack build src-tauri --target web --out-dir ../src/wasm-core/pkg --dev",
+    "build:wasm-core:release": "wasm-pack build src-tauri --target web --out-dir ../src/wasm-core/pkg --release",
+    "dev:web": "npm run build:wasm-core && vite --config vite.web.config.ts",
+    "build:web": "npm run build:wasm-core:release && tsc -b && vite build --config vite.web.config.ts"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.3.0",
