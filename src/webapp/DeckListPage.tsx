@@ -23,6 +23,12 @@ export function DeckListPage() {
           {active && (
             <span className="text-sm text-text-muted">{active.display_name}</span>
           )}
+          <button
+            onClick={() => navigate("/sync")}
+            className="text-sm text-primary-500 font-medium"
+          >
+            Sync
+          </button>
         </div>
       </div>
       <ProfileOnboarding />
@@ -32,9 +38,15 @@ export function DeckListPage() {
           <p className="text-text-muted text-center mt-8">Loading decks…</p>
         )}
         {!loading && decks.length === 0 && (
-          <p className="text-text-muted text-center mt-8">
-            No decks yet. Import one from your desktop app to get started.
-          </p>
+          <div className="text-center mt-8 space-y-3">
+            <p className="text-text-muted">No decks yet.</p>
+            <button
+              onClick={() => navigate("/sync")}
+              className="px-5 py-2.5 bg-primary-600 text-white rounded-xl font-medium"
+            >
+              Import a deck
+            </button>
+          </div>
         )}
         <div className="space-y-2">
           {decks.map((deck) => (

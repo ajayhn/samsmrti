@@ -4,6 +4,7 @@ import { useProfileStore } from "./stores/profileStore";
 import { useKarmaStore } from "./stores/karmaStore";
 import { DeckListPage } from "./webapp/DeckListPage";
 import { ReviewSessionPage } from "./webapp/ReviewSessionPage";
+import { SyncPage } from "./webapp/SyncPage";
 
 export default function AppWeb() {
   const fetchProfiles = useProfileStore((s) => s.fetchProfiles);
@@ -19,6 +20,7 @@ export default function AppWeb() {
         <Routes>
           <Route path="/" element={<DeckListPage />} />
           <Route path="/review/:deckId" element={<ReviewSessionPage />} />
+          <Route path="/sync" element={<SyncPage />} />
         </Routes>
       </div>
     </HashRouter>
