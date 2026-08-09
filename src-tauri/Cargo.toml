@@ -48,6 +48,13 @@ wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 # uuid v4 needs an explicit randomness source on this target; browser crypto via getrandom's "js" backend.
 uuid = { version = "1", features = ["js"] }
+# OPFS-backed persistence (sahpool VFS). Must run inside a dedicated Worker --
+# confirmed via the crate's own wasm_bindgen_test_configure!(run_in_dedicated_worker).
+# Pinned to match the sqlite-wasm-rs version rusqlite pulls in via its
+# ffi-sqlite-wasm-rs feature -- both need to share the same compiled sqlite3
+# instance, so a version mismatch here would be a real (not just semver) bug.
+sqlite-wasm-vfs = "0.2.0"
+sqlite-wasm-rs = "=0.5.5"
 
 [[bin]]
 name = "import_anki"

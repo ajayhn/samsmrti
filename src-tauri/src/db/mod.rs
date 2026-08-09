@@ -38,13 +38,11 @@ impl Database {
         Ok(())
     }
 
-    /// In-memory database, no on-disk file. Used by native tests, and as the
-    /// wasm32 core's placeholder store ahead of real OPFS persistence (the
-    /// sahpool VFS needs a dedicated Worker -- see Phase 0 spike notes in
-    /// streamed-yawning-coral.md -- so data does not yet survive a reload).
-    #[cfg(any(test, target_arch = "wasm32"))]
-    pub fn in_memory() -> Result<Self, rusqlite::Error> {
-        let conn = Connection::open_in_memory()?;
+    /// Shared by every constructor that doesn't need the native-only
+    /// migrations/dedupe/country-seed steps in `new()`: applies schema.sql
+    /// (idempotent -- every statement is `IF NOT EXISTS`) and seeds
+    /// profiles/default note types/card_progress migrations.
+    fn init_schema_and_seed(conn: Connection) -> Result<Self, rusqlite::Error> {
         conn.execute_batch("PRAGMA foreign_keys=ON;")?;
         let schema = include_str!("schema.sql");
         conn.execute_batch(schema)?;
@@ -58,6 +56,13 @@ impl Database {
             card_progress::apply_schema_migrations(&conn)?;
         }
         Ok(db)
+    }
+
+    /// In-memory database, no on-disk file. Used by native tests, and as the
+    /// wasm32 core's fallback store when OPFS isn't available.
+    #[cfg(any(test, target_arch = "wasm32"))]
+    pub fn in_memory() -> Result<Self, rusqlite::Error> {
+        Self::init_schema_and_seed(Connection::open_in_memory()?)
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -582,6 +587,32 @@ impl Database {
     }
 }
 
+/// OPFS filename for the persisted database, opened through the sahpool VFS
+/// once it's installed as the default VFS (see `wasm_singleton::init_opfs`).
+#[cfg(target_arch = "wasm32")]
+const OPFS_DB_FILE: &str = "samsmrti.db";
+
+#[cfg(target_arch = "wasm32")]
+impl Database {
+    /// OPFS-persisted database via the sahpool VFS. Must run inside a
+    /// dedicated Worker -- confirmed from sqlite-wasm-vfs's own test suite
+    /// (`wasm_bindgen_test_configure!(run_in_dedicated_worker)`), since the
+    /// underlying `FileSystemSyncAccessHandle` API is Worker-only. Installing
+    /// with `default_vfs: true` means the plain `Connection::open` below
+    /// (no VFS name) already resolves through OPFS.
+    pub async fn open_opfs() -> Result<Self, String> {
+        sqlite_wasm_vfs::sahpool::install::<sqlite_wasm_rs::WasmOsCallback>(
+            &sqlite_wasm_vfs::sahpool::OpfsSAHPoolCfg::default(),
+            true,
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+
+        let conn = Connection::open(OPFS_DB_FILE).map_err(|e| e.to_string())?;
+        Self::init_schema_and_seed(conn).map_err(|e| e.to_string())
+    }
+}
+
 /// Holds the single `Database` a wasm core instance owns. On native, `Database`
 /// is Tauri-managed `State` injected per command; on wasm32 there is no
 /// equivalent app-state container, so each wasm module instance (expected to
@@ -596,8 +627,17 @@ pub mod wasm_singleton {
         static DB: RefCell<Option<Database>> = RefCell::new(None);
     }
 
+    /// In-memory fallback -- no OPFS persistence. Useful for quick checks;
+    /// the real PWA should call `init_opfs` instead.
     pub fn init_in_memory() -> Result<(), String> {
         let db = Database::in_memory().map_err(|e| e.to_string())?;
+        DB.with(|cell| *cell.borrow_mut() = Some(db));
+        Ok(())
+    }
+
+    /// Must be called from within a dedicated Worker (see `Database::open_opfs`).
+    pub async fn init_opfs() -> Result<(), String> {
+        let db = Database::open_opfs().await?;
         DB.with(|cell| *cell.borrow_mut() = Some(db));
         Ok(())
     }
