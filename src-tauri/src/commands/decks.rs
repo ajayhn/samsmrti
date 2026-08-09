@@ -225,6 +225,51 @@ pub struct DeletedDeckSnapshot {
     pub data: serde_json::Value,
 }
 
+pub fn delete_deck_core(conn: &rusqlite::Connection, id: &str) -> Result<DeletedDeckSnapshot, String> {
+    use crate::db::deck_tree::deck_scope_ids;
+
+    let snapshot_data =
+        crate::backup::content::build_deck_delete_snapshot(conn, id).map_err(|e| e.to_string())?;
+    let scope = deck_scope_ids(conn, id).map_err(|e| e.to_string())?;
+
+    // Delete deepest subdecks first so notes/cards cascade cleanly.
+    let mut by_depth: Vec<(usize, String)> = Vec::new();
+    for deck_id in &scope {
+        let depth: i64 = conn
+            .query_row(
+                "WITH RECURSIVE chain AS (
+                    SELECT id, parent_id, 0 AS depth FROM decks WHERE id = ?1
+                    UNION ALL
+                    SELECT d.id, d.parent_id, chain.depth + 1
+                    FROM decks d
+                    INNER JOIN chain ON d.id = chain.parent_id
+                 )
+                 SELECT MAX(depth) FROM chain",
+                [deck_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        by_depth.push((depth as usize, deck_id.clone()));
+    }
+    by_depth.sort_by(|a, b| b.0.cmp(&a.0));
+
+    for (_, deck_id) in by_depth {
+        conn.execute("DELETE FROM decks WHERE id = ?1", [&deck_id])
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(DeletedDeckSnapshot {
+        root_deck_id: id.to_string(),
+        data: snapshot_data,
+    })
+}
+
+pub fn restore_deleted_deck_core(
+    conn: &rusqlite::Connection,
+    snapshot: &DeletedDeckSnapshot,
+) -> Result<(), String> {
+    crate::backup::content::restore_deck_delete_snapshot(conn, &snapshot.data).map_err(|e| e.to_string())
+}
+
 // ---------------------------------------------------------------------------
 // Native (Tauri) command wrappers: resolve profile_id/Database from Tauri
 // State and WebviewWindow, then delegate to the core functions above.
@@ -234,7 +279,6 @@ pub struct DeletedDeckSnapshot {
 mod native {
     use super::*;
     use crate::commands::window_profiles::WindowProfiles;
-    use crate::db::deck_tree::deck_scope_ids;
     use crate::db::Database;
     use tauri::{State, WebviewWindow};
 
@@ -264,39 +308,7 @@ mod native {
     #[tauri::command]
     pub fn delete_deck(db: State<Database>, id: String) -> Result<DeletedDeckSnapshot, String> {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        let snapshot_data =
-            crate::backup::content::build_deck_delete_snapshot(&conn, &id).map_err(|e| e.to_string())?;
-        let scope = deck_scope_ids(&conn, &id).map_err(|e| e.to_string())?;
-
-        // Delete deepest subdecks first so notes/cards cascade cleanly.
-        let mut by_depth: Vec<(usize, String)> = Vec::new();
-        for deck_id in &scope {
-            let depth: i64 = conn
-                .query_row(
-                    "WITH RECURSIVE chain AS (
-                        SELECT id, parent_id, 0 AS depth FROM decks WHERE id = ?1
-                        UNION ALL
-                        SELECT d.id, d.parent_id, chain.depth + 1
-                        FROM decks d
-                        INNER JOIN chain ON d.id = chain.parent_id
-                     )
-                     SELECT MAX(depth) FROM chain",
-                    [deck_id],
-                    |row| row.get(0),
-                )
-                .map_err(|e| e.to_string())?;
-            by_depth.push((depth as usize, deck_id.clone()));
-        }
-        by_depth.sort_by(|a, b| b.0.cmp(&a.0));
-
-        for (_, deck_id) in by_depth {
-            conn.execute("DELETE FROM decks WHERE id = ?1", [&deck_id])
-                .map_err(|e| e.to_string())?;
-        }
-        Ok(DeletedDeckSnapshot {
-            root_deck_id: id,
-            data: snapshot_data,
-        })
+        delete_deck_core(&conn, &id)
     }
 
     #[tauri::command]
@@ -305,8 +317,7 @@ mod native {
         snapshot: DeletedDeckSnapshot,
     ) -> Result<(), String> {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        crate::backup::content::restore_deck_delete_snapshot(&conn, &snapshot.data)
-            .map_err(|e| e.to_string())
+        restore_deleted_deck_core(&conn, &snapshot)
     }
 }
 
@@ -316,8 +327,6 @@ pub use native::*;
 // ---------------------------------------------------------------------------
 // wasm-bindgen exports: same JSON-in/JSON-out shape the TS `api` object will
 // call directly instead of Tauri's `invoke()`. Only the profile-scoped,
-// backup-independent operations are ported so far -- see native::delete_deck
-// doc comment above for why delete/restore stay native-only for now.
 // ---------------------------------------------------------------------------
 
 #[cfg(target_arch = "wasm32")]
@@ -356,6 +365,27 @@ mod wasm {
             let conn = db.conn.lock().map_err(|e| e.to_string())?;
             let deck = update_deck_core(&conn, input)?;
             serde_json::to_string(&deck).map_err(|e| e.to_string())
+        })
+        .map_err(|e| JsValue::from_str(&e))
+    }
+
+    #[wasm_bindgen(js_name = deleteDeck)]
+    pub fn delete_deck(id: String) -> Result<String, JsValue> {
+        with_db(|db| {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            let snapshot = delete_deck_core(&conn, &id)?;
+            serde_json::to_string(&snapshot).map_err(|e| e.to_string())
+        })
+        .map_err(|e| JsValue::from_str(&e))
+    }
+
+    #[wasm_bindgen(js_name = restoreDeletedDeck)]
+    pub fn restore_deleted_deck(snapshot_json: String) -> Result<(), JsValue> {
+        let snapshot: DeletedDeckSnapshot =
+            serde_json::from_str(&snapshot_json).map_err(|e| JsValue::from_str(&e.to_string()))?;
+        with_db(|db| {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            restore_deleted_deck_core(&conn, &snapshot)
         })
         .map_err(|e| JsValue::from_str(&e))
     }

@@ -1,9 +1,8 @@
+mod backup;
 mod commands;
 pub mod db;
 pub mod seed;
 
-#[cfg(not(target_arch = "wasm32"))]
-mod backup;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod import;
 
