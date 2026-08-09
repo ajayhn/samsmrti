@@ -31,6 +31,13 @@
       "runtimeArgs": ["vite", "--config", "vite.web.config.ts", "--port", "4243"],
       "port": 4243,
       "url": "http://localhost:4243/"
+    },
+    {
+      "name": "samsmrti-web-preview",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["vite", "preview", "--config", "vite.web.config.ts", "--port", "4244"],
+      "port": 4244,
+      "url": "http://localhost:4244/"
     }
   ]
 }
