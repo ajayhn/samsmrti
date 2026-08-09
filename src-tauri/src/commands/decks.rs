@@ -1,9 +1,6 @@
-use crate::commands::window_profiles::WindowProfiles;
-use crate::db::deck_tree::{deck_scope_ids, direct_deck_counts, is_ancestor_of, rollup_deck_counts};
-use crate::db::Database;
+use crate::db::deck_tree::{direct_deck_counts, is_ancestor_of, rollup_deck_counts};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use tauri::{State, WebviewWindow};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Deck {
@@ -70,14 +67,17 @@ fn validate_parent(
     Ok(())
 }
 
-#[tauri::command]
-pub fn get_decks(
-    db: State<Database>,
-    window: WebviewWindow,
-    profiles: State<'_, WindowProfiles>,
+// ---------------------------------------------------------------------------
+// Core: pure business logic, no Tauri or wasm-bindgen types. Callable from
+// both the native command wrappers below and the wasm-bindgen exports in
+// wasm_api.rs. delete_deck/restore_deleted_deck aren't ported yet -- they
+// pull in backup::content, which still depends on `tempfile` (native-only).
+// ---------------------------------------------------------------------------
+
+pub fn get_decks_core(
+    conn: &rusqlite::Connection,
+    profile_id: &str,
 ) -> Result<Vec<DeckWithCounts>, String> {
-    let active = profiles.for_window(&window)?;
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let now = chrono::Utc::now().timestamp();
 
     let mut stmt = conn
@@ -109,8 +109,7 @@ pub fn get_decks(
         .iter()
         .map(|d| (d.id.clone(), d.parent_id.clone()))
         .collect();
-    let direct =
-        direct_deck_counts(&conn, &active.id, now).map_err(|e| e.to_string())?;
+    let direct = direct_deck_counts(conn, profile_id, now).map_err(|e| e.to_string())?;
     let rolled = rollup_deck_counts(&deck_ids, &parent_of, &direct);
 
     let decks = rows
@@ -130,9 +129,10 @@ pub fn get_decks(
     Ok(decks)
 }
 
-#[tauri::command]
-pub fn create_deck(db: State<Database>, input: CreateDeckInput) -> Result<Deck, String> {
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+pub fn create_deck_core(
+    conn: &rusqlite::Connection,
+    input: CreateDeckInput,
+) -> Result<Deck, String> {
     let id = format!("dk_{}", uuid::Uuid::new_v4().simple());
     let now = chrono::Utc::now().timestamp();
     let desc = input.description.unwrap_or_default();
@@ -168,9 +168,10 @@ pub fn create_deck(db: State<Database>, input: CreateDeckInput) -> Result<Deck, 
     })
 }
 
-#[tauri::command]
-pub fn update_deck(db: State<Database>, input: UpdateDeckInput) -> Result<Deck, String> {
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+pub fn update_deck_core(
+    conn: &rusqlite::Connection,
+    input: UpdateDeckInput,
+) -> Result<Deck, String> {
     let now = chrono::Utc::now().timestamp();
 
     let current: Deck = conn
@@ -198,7 +199,7 @@ pub fn update_deck(db: State<Database>, input: UpdateDeckInput) -> Result<Deck, 
     let new_per_day = input.new_per_day.unwrap_or(current.new_per_day);
     let max_reviews = input.max_reviews.unwrap_or(current.max_reviews);
 
-    validate_parent(&conn, &input.id, &parent_id)?;
+    validate_parent(conn, &input.id, &parent_id)?;
 
     conn.execute(
         "UPDATE decks SET name=?1, parent_id=?2, description=?3, new_per_day=?4, max_reviews=?5, updated_at=?6 WHERE id=?7",
@@ -224,50 +225,142 @@ pub struct DeletedDeckSnapshot {
     pub data: serde_json::Value,
 }
 
-#[tauri::command]
-pub fn delete_deck(db: State<Database>, id: String) -> Result<DeletedDeckSnapshot, String> {
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let snapshot_data =
-        crate::backup::content::build_deck_delete_snapshot(&conn, &id).map_err(|e| e.to_string())?;
-    let scope = deck_scope_ids(&conn, &id).map_err(|e| e.to_string())?;
+// ---------------------------------------------------------------------------
+// Native (Tauri) command wrappers: resolve profile_id/Database from Tauri
+// State and WebviewWindow, then delegate to the core functions above.
+// ---------------------------------------------------------------------------
 
-    // Delete deepest subdecks first so notes/cards cascade cleanly.
-    let mut by_depth: Vec<(usize, String)> = Vec::new();
-    for deck_id in &scope {
-        let depth: i64 = conn
-            .query_row(
-                "WITH RECURSIVE chain AS (
-                    SELECT id, parent_id, 0 AS depth FROM decks WHERE id = ?1
-                    UNION ALL
-                    SELECT d.id, d.parent_id, chain.depth + 1
-                    FROM decks d
-                    INNER JOIN chain ON d.id = chain.parent_id
-                 )
-                 SELECT MAX(depth) FROM chain",
-                [deck_id],
-                |row| row.get(0),
-            )
-            .map_err(|e| e.to_string())?;
-        by_depth.push((depth as usize, deck_id.clone()));
-    }
-    by_depth.sort_by(|a, b| b.0.cmp(&a.0));
+#[cfg(not(target_arch = "wasm32"))]
+mod native {
+    use super::*;
+    use crate::commands::window_profiles::WindowProfiles;
+    use crate::db::deck_tree::deck_scope_ids;
+    use crate::db::Database;
+    use tauri::{State, WebviewWindow};
 
-    for (_, deck_id) in by_depth {
-        conn.execute("DELETE FROM decks WHERE id = ?1", [&deck_id])
-            .map_err(|e| e.to_string())?;
+    #[tauri::command]
+    pub fn get_decks(
+        db: State<Database>,
+        window: WebviewWindow,
+        profiles: State<'_, WindowProfiles>,
+    ) -> Result<Vec<DeckWithCounts>, String> {
+        let active = profiles.for_window(&window)?;
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        get_decks_core(&conn, &active.id)
     }
-    Ok(DeletedDeckSnapshot {
-        root_deck_id: id,
-        data: snapshot_data,
-    })
+
+    #[tauri::command]
+    pub fn create_deck(db: State<Database>, input: CreateDeckInput) -> Result<Deck, String> {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        create_deck_core(&conn, input)
+    }
+
+    #[tauri::command]
+    pub fn update_deck(db: State<Database>, input: UpdateDeckInput) -> Result<Deck, String> {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        update_deck_core(&conn, input)
+    }
+
+    #[tauri::command]
+    pub fn delete_deck(db: State<Database>, id: String) -> Result<DeletedDeckSnapshot, String> {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let snapshot_data =
+            crate::backup::content::build_deck_delete_snapshot(&conn, &id).map_err(|e| e.to_string())?;
+        let scope = deck_scope_ids(&conn, &id).map_err(|e| e.to_string())?;
+
+        // Delete deepest subdecks first so notes/cards cascade cleanly.
+        let mut by_depth: Vec<(usize, String)> = Vec::new();
+        for deck_id in &scope {
+            let depth: i64 = conn
+                .query_row(
+                    "WITH RECURSIVE chain AS (
+                        SELECT id, parent_id, 0 AS depth FROM decks WHERE id = ?1
+                        UNION ALL
+                        SELECT d.id, d.parent_id, chain.depth + 1
+                        FROM decks d
+                        INNER JOIN chain ON d.id = chain.parent_id
+                     )
+                     SELECT MAX(depth) FROM chain",
+                    [deck_id],
+                    |row| row.get(0),
+                )
+                .map_err(|e| e.to_string())?;
+            by_depth.push((depth as usize, deck_id.clone()));
+        }
+        by_depth.sort_by(|a, b| b.0.cmp(&a.0));
+
+        for (_, deck_id) in by_depth {
+            conn.execute("DELETE FROM decks WHERE id = ?1", [&deck_id])
+                .map_err(|e| e.to_string())?;
+        }
+        Ok(DeletedDeckSnapshot {
+            root_deck_id: id,
+            data: snapshot_data,
+        })
+    }
+
+    #[tauri::command]
+    pub fn restore_deleted_deck(
+        db: State<Database>,
+        snapshot: DeletedDeckSnapshot,
+    ) -> Result<(), String> {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        crate::backup::content::restore_deck_delete_snapshot(&conn, &snapshot.data)
+            .map_err(|e| e.to_string())
+    }
 }
 
-#[tauri::command]
-pub fn restore_deleted_deck(
-    db: State<Database>,
-    snapshot: DeletedDeckSnapshot,
-) -> Result<(), String> {
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    crate::backup::content::restore_deck_delete_snapshot(&conn, &snapshot.data)
-        .map_err(|e| e.to_string())
+#[cfg(not(target_arch = "wasm32"))]
+pub use native::*;
+
+// ---------------------------------------------------------------------------
+// wasm-bindgen exports: same JSON-in/JSON-out shape the TS `api` object will
+// call directly instead of Tauri's `invoke()`. Only the profile-scoped,
+// backup-independent operations are ported so far -- see native::delete_deck
+// doc comment above for why delete/restore stay native-only for now.
+// ---------------------------------------------------------------------------
+
+#[cfg(target_arch = "wasm32")]
+mod wasm {
+    use super::*;
+    use crate::db::wasm_singleton::with_db;
+    use wasm_bindgen::prelude::*;
+
+    #[wasm_bindgen(js_name = getDecks)]
+    pub fn get_decks(profile_id: String) -> Result<String, JsValue> {
+        with_db(|db| {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            let decks = get_decks_core(&conn, &profile_id)?;
+            serde_json::to_string(&decks).map_err(|e| e.to_string())
+        })
+        .map_err(|e| JsValue::from_str(&e))
+    }
+
+    #[wasm_bindgen(js_name = createDeck)]
+    pub fn create_deck(input_json: String) -> Result<String, JsValue> {
+        let input: CreateDeckInput =
+            serde_json::from_str(&input_json).map_err(|e| JsValue::from_str(&e.to_string()))?;
+        with_db(|db| {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            let deck = create_deck_core(&conn, input)?;
+            serde_json::to_string(&deck).map_err(|e| e.to_string())
+        })
+        .map_err(|e| JsValue::from_str(&e))
+    }
+
+    #[wasm_bindgen(js_name = updateDeck)]
+    pub fn update_deck(input_json: String) -> Result<String, JsValue> {
+        let input: UpdateDeckInput =
+            serde_json::from_str(&input_json).map_err(|e| JsValue::from_str(&e.to_string()))?;
+        with_db(|db| {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            let deck = update_deck_core(&conn, input)?;
+            serde_json::to_string(&deck).map_err(|e| e.to_string())
+        })
+        .map_err(|e| JsValue::from_str(&e))
+    }
 }
+
+#[cfg(target_arch = "wasm32")]
+#[allow(unused_imports)] // #[wasm_bindgen] fns here are called from JS, not Rust
+pub use wasm::*;

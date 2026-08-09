@@ -3,8 +3,11 @@ pub mod card_progress;
 pub mod deck_tree;
 
 use rusqlite::Connection;
+#[cfg(not(target_arch = "wasm32"))]
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(not(target_arch = "wasm32"))]
+use std::path::PathBuf;
 use std::sync::Mutex;
 
 pub use countries_graph::sync_country_note;
@@ -35,7 +38,11 @@ impl Database {
         Ok(())
     }
 
-    #[cfg(test)]
+    /// In-memory database, no on-disk file. Used by native tests, and as the
+    /// wasm32 core's placeholder store ahead of real OPFS persistence (the
+    /// sahpool VFS needs a dedicated Worker -- see Phase 0 spike notes in
+    /// streamed-yawning-coral.md -- so data does not yet survive a reload).
+    #[cfg(any(test, target_arch = "wasm32"))]
     pub fn in_memory() -> Result<Self, rusqlite::Error> {
         let conn = Connection::open_in_memory()?;
         conn.execute_batch("PRAGMA foreign_keys=ON;")?;
@@ -53,6 +60,7 @@ impl Database {
         Ok(db)
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn new(app_data_dir: &PathBuf) -> Result<Self, rusqlite::Error> {
         fs::create_dir_all(app_data_dir).ok();
         let db_path = app_data_dir.join("samsmrti.db");
@@ -571,5 +579,36 @@ impl Database {
         }
 
         Ok(())
+    }
+}
+
+/// Holds the single `Database` a wasm core instance owns. On native, `Database`
+/// is Tauri-managed `State` injected per command; on wasm32 there is no
+/// equivalent app-state container, so each wasm module instance (expected to
+/// run inside one dedicated Worker per the OPFS spike findings) owns exactly
+/// one `Database` here instead.
+#[cfg(target_arch = "wasm32")]
+pub mod wasm_singleton {
+    use super::Database;
+    use std::cell::RefCell;
+
+    thread_local! {
+        static DB: RefCell<Option<Database>> = RefCell::new(None);
+    }
+
+    pub fn init_in_memory() -> Result<(), String> {
+        let db = Database::in_memory().map_err(|e| e.to_string())?;
+        DB.with(|cell| *cell.borrow_mut() = Some(db));
+        Ok(())
+    }
+
+    pub fn with_db<T>(f: impl FnOnce(&Database) -> Result<T, String>) -> Result<T, String> {
+        DB.with(|cell| {
+            let borrowed = cell.borrow();
+            let db = borrowed
+                .as_ref()
+                .ok_or_else(|| "database not initialized; call init() first".to_string())?;
+            f(db)
+        })
     }
 }
