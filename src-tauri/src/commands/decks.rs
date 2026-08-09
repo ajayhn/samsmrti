@@ -336,10 +336,11 @@ mod wasm {
     use wasm_bindgen::prelude::*;
 
     #[wasm_bindgen(js_name = getDecks)]
-    pub fn get_decks(profile_id: String) -> Result<String, JsValue> {
+    pub fn get_decks() -> Result<String, JsValue> {
         with_db(|db| {
             let conn = db.conn.lock().map_err(|e| e.to_string())?;
-            let decks = get_decks_core(&conn, &profile_id)?;
+            let active = crate::commands::profiles::load_active_profile_from_db(&conn)?;
+            let decks = get_decks_core(&conn, &active.id)?;
             serde_json::to_string(&decks).map_err(|e| e.to_string())
         })
         .map_err(|e| JsValue::from_str(&e))
