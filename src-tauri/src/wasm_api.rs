@@ -11,6 +11,8 @@ use wasm_bindgen::prelude::*;
 #[allow(unused_imports)] // #[wasm_bindgen] fns here are called from JS, not Rust
 pub use crate::commands::decks::*;
 #[allow(unused_imports)]
+pub use crate::commands::karma::*;
+#[allow(unused_imports)]
 pub use crate::commands::profiles::*;
 
 #[wasm_bindgen]

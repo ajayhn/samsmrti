@@ -1,4 +1,5 @@
 pub mod decks;
+pub mod karma;
 pub mod profiles;
 
 // Not yet ported to the platform-agnostic core/wasm pattern (see Phase 1 of
@@ -11,8 +12,6 @@ pub mod export;
 pub mod graph;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod import;
-#[cfg(not(target_arch = "wasm32"))]
-pub mod karma;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod note_types;
 #[cfg(not(target_arch = "wasm32"))]
