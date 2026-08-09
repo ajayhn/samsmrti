@@ -1,4 +1,5 @@
 pub mod decks;
+pub mod profiles;
 
 // Not yet ported to the platform-agnostic core/wasm pattern (see Phase 1 of
 // /Users/hampapurajay/.claude/plans/streamed-yawning-coral.md) -- native/Tauri only for now.
@@ -16,8 +17,6 @@ pub mod karma;
 pub mod note_types;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod notes;
-#[cfg(not(target_arch = "wasm32"))]
-pub mod profiles;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod window_profiles;
 #[cfg(not(target_arch = "wasm32"))]
