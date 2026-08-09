@@ -14,6 +14,8 @@ pub use crate::commands::decks::*;
 pub use crate::commands::karma::*;
 #[allow(unused_imports)]
 pub use crate::commands::profiles::*;
+#[allow(unused_imports)]
+pub use crate::commands::review::*;
 
 #[wasm_bindgen]
 pub fn init() -> Result<(), JsValue> {

@@ -538,11 +538,11 @@ mod wasm {
     }
 
     #[wasm_bindgen(js_name = recordActivity)]
-    pub fn record_activity(seconds: i64) -> Result<String, JsValue> {
+    pub fn record_activity(seconds: f64) -> Result<String, JsValue> {
         with_db(|db| {
             let conn = db.conn.lock().map_err(|e| e.to_string())?;
             let active = load_active_profile_from_db(&conn)?;
-            let overview = record_activity_core(&conn, &active, seconds)?;
+            let overview = record_activity_core(&conn, &active, seconds as i64)?;
             serde_json::to_string(&overview).map_err(|e| e.to_string())
         })
         .map_err(|e| JsValue::from_str(&e))
