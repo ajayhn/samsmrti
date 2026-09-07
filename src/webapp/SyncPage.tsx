@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { api, type ContentDeckOption } from "../lib/webApi";
 import { useDeckStore } from "../stores/deckStore";
 
@@ -97,8 +97,17 @@ function ImportPanel() {
   const [fileContent, setFileContent] = useState<string | null>(null);
   const [preview, setPreview] = useState<ContentDeckOption[] | null>(null);
   const [busy, setBusy] = useState(false);
+  const [urlBusy, setUrlBusy] = useState(false);
+  const [urlInput, setUrlInput] = useState("");
   const [status, setStatus] = useState("");
   const fetchDecks = useDeckStore((s) => s.fetchDecks);
+  const [searchParams, setSearchParams] = useSearchParams();
+
+  const previewFromText = async (text: string) => {
+    const decks = await api.previewContentImport(text);
+    setFileContent(text);
+    setPreview(decks);
+  };
 
   const handleFile = async (file: File) => {
     setStatus("");
@@ -106,13 +115,47 @@ function ImportPanel() {
     setFileContent(null);
     try {
       const text = await file.text();
-      const decks = await api.previewContentImport(text);
-      setFileContent(text);
-      setPreview(decks);
+      await previewFromText(text);
     } catch (e) {
       setStatus(String(e));
     }
   };
+
+  const handleFetchUrl = async (url: string) => {
+    setStatus("");
+    setPreview(null);
+    setFileContent(null);
+    setUrlBusy(true);
+    try {
+      const response = await fetch(url);
+      if (!response.ok) {
+        throw new Error(`Server returned ${response.status} ${response.statusText}`);
+      }
+      const text = await response.text();
+      await previewFromText(text);
+    } catch (e) {
+      setStatus(
+        `Couldn't fetch that link. If it's hosted elsewhere, its server needs to allow ` +
+          `cross-origin requests from this app (CORS). (${String(e)})`
+      );
+    } finally {
+      setUrlBusy(false);
+    }
+  };
+
+  // Deep link: .../#/sync?import=<url> pre-fills and previews automatically,
+  // but still requires an explicit tap on "Import" to actually commit it.
+  useEffect(() => {
+    const linked = searchParams.get("import");
+    if (linked) {
+      setUrlInput(linked);
+      handleFetchUrl(linked);
+      const next = new URLSearchParams(searchParams);
+      next.delete("import");
+      setSearchParams(next, { replace: true });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const handleImport = async () => {
     if (!fileContent) return;
@@ -127,6 +170,7 @@ function ImportPanel() {
       );
       setPreview(null);
       setFileContent(null);
+      setUrlInput("");
       if (fileInputRef.current) fileInputRef.current.value = "";
       await fetchDecks();
     } catch (e) {
@@ -152,6 +196,28 @@ function ImportPanel() {
         }}
         className="block w-full text-sm text-text-secondary file:mr-3 file:py-2 file:px-3 file:rounded-lg file:border-0 file:bg-primary-600 file:text-white"
       />
+      <div className="flex items-center gap-2 text-xs text-text-muted">
+        <div className="flex-1 border-t border-border" />
+        or
+        <div className="flex-1 border-t border-border" />
+      </div>
+      <div className="flex gap-2">
+        <input
+          type="url"
+          inputMode="url"
+          placeholder="Paste a deck link (https://...)"
+          value={urlInput}
+          onChange={(e) => setUrlInput(e.target.value)}
+          className="flex-1 min-w-0 px-3 py-2 rounded-lg bg-surface-alt border border-border text-sm text-text"
+        />
+        <button
+          onClick={() => urlInput && handleFetchUrl(urlInput)}
+          disabled={urlBusy || !urlInput}
+          className="px-4 py-2 bg-primary-600 text-white rounded-lg text-sm font-medium disabled:opacity-50 shrink-0"
+        >
+          {urlBusy ? "Fetching…" : "Fetch"}
+        </button>
+      </div>
       {preview && (
         <div className="space-y-1.5">
           <p className="text-sm text-text">This file contains:</p>
