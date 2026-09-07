@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useCallback, useEffect } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { KarmaDisplay } from "../components/karma/KarmaDisplay";
 import { ProfileOnboarding } from "../components/profile/ProfileOnboarding";
@@ -6,6 +6,7 @@ import { useActivityTracker } from "../hooks/useActivityTracker";
 import { useReviewStore } from "../stores/reviewStore";
 import { useDeckStore } from "../stores/deckStore";
 import { renderStudyContent } from "../lib/cloze";
+import { isTypingTarget } from "../lib/isTypingTarget";
 
 const RATING_LABELS: Record<number, string> = {
   1: "Again",
@@ -13,6 +14,9 @@ const RATING_LABELS: Record<number, string> = {
   3: "Good",
   4: "Easy",
 };
+
+const RATING_KEYS = ["1", "2", "3", "4"];
+const RATING_LETTER_KEYS = ["a", "h", "g", "e"];
 
 export function ReviewSessionPage() {
   const { deckId } = useParams<{ deckId: string }>();
@@ -44,6 +48,37 @@ export function ReviewSessionPage() {
   }, [deckId]);
 
   const card = currentCard();
+
+  const handleKeyDown = useCallback(
+    (e: KeyboardEvent) => {
+      if (loading || !sessionActive || !card) return;
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      if (isTypingTarget(e.target)) return;
+
+      if (e.key === " " && !isFlipped) {
+        e.preventDefault();
+        flipCard();
+        return;
+      }
+
+      if (isFlipped) {
+        const lower = e.key.toLowerCase();
+        const idx = RATING_KEYS.includes(e.key)
+          ? RATING_KEYS.indexOf(e.key)
+          : RATING_LETTER_KEYS.indexOf(lower);
+        if (idx !== -1) {
+          e.preventDefault();
+          answerCard(idx + 1);
+        }
+      }
+    },
+    [loading, sessionActive, card, isFlipped, flipCard, answerCard]
+  );
+
+  useEffect(() => {
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [handleKeyDown]);
 
   if (loading) {
     return (
@@ -133,6 +168,7 @@ export function ReviewSessionPage() {
                 className="w-full py-4 bg-primary-600 text-white rounded-xl font-medium text-lg"
               >
                 Show Answer
+                <span className="text-sm opacity-80 ml-2">(Space)</span>
               </button>
             ) : (
               <div className="grid grid-cols-4 gap-2">
@@ -150,7 +186,13 @@ export function ReviewSessionPage() {
                             : "bg-blue-500"
                     }`}
                   >
-                    <div>{RATING_LABELS[rating]}</div>
+                    <div>
+                      {RATING_LABELS[rating]}
+                      <span className="opacity-75">
+                        {" "}
+                        ({rating}/{RATING_LETTER_KEYS[rating - 1].toUpperCase()})
+                      </span>
+                    </div>
                     {intervals && (
                       <div className="text-xs opacity-80">{intervals[rating - 1]}</div>
                     )}

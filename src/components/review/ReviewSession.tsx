@@ -21,6 +21,7 @@ import { isTypingTarget } from "../../lib/isTypingTarget";
 
 const RATING_LABELS = ["Again", "Hard", "Good", "Easy"] as const;
 const RATING_KEYS = ["1", "2", "3", "4"];
+const RATING_LETTER_KEYS = ["a", "h", "g", "e"];
 const RATING_COLORS = [
   "bg-danger hover:bg-red-600",
   "bg-orange-500 hover:bg-orange-600",
@@ -183,6 +184,7 @@ export function ReviewSession() {
 
       if (
         e.key.toLowerCase() === "e" &&
+        !isFlipped &&
         !e.ctrlKey &&
         !e.metaKey &&
         !e.altKey &&
@@ -199,6 +201,16 @@ export function ReviewSession() {
       } else if (isFlipped && RATING_KEYS.includes(e.key)) {
         e.preventDefault();
         handleAnswer(parseInt(e.key, 10));
+      } else if (
+        isFlipped &&
+        !e.ctrlKey &&
+        !e.metaKey &&
+        !e.altKey &&
+        !isTypingTarget(e.target) &&
+        RATING_LETTER_KEYS.includes(e.key.toLowerCase())
+      ) {
+        e.preventDefault();
+        handleAnswer(RATING_LETTER_KEYS.indexOf(e.key.toLowerCase()) + 1);
       } else if (e.key === "9") {
         e.preventDefault();
         handleBury();
@@ -444,7 +456,10 @@ export function ReviewSession() {
                     onClick={() => handleAnswer(i + 1)}
                     className={`py-3 rounded-xl text-white font-medium transition-colors cursor-pointer ${RATING_COLORS[i]}`}
                   >
-                    {label}({i + 1})
+                    {label}
+                    <span className="opacity-75">
+                      ({i + 1}/{RATING_LETTER_KEYS[i].toUpperCase()})
+                    </span>
                     {intervals && (
                       <span className="block text-xs opacity-75 mt-0.5">
                         {intervals[i]}
