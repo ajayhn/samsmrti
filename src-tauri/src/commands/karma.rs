@@ -1,9 +1,6 @@
 use crate::commands::profiles::ActiveProfile;
-use crate::commands::window_profiles::WindowProfiles;
-use crate::db::Database;
 use rusqlite::{Connection, OptionalExtension};
 use serde::Serialize;
-use tauri::{State, WebviewWindow};
 
 pub const REVIEW_CENTS_FULL: i64 = 10;
 pub const REVIEW_CENTS_MID: i64 = 5;
@@ -453,35 +450,19 @@ pub fn build_overview_conn(conn: &Connection, active: &ActiveProfile) -> Result<
     })
 }
 
-#[tauri::command]
-pub fn get_karma_overview(
-    db: State<Database>,
-    window: WebviewWindow,
-    profiles: State<'_, WindowProfiles>,
-) -> Result<KarmaOverview, String> {
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let active = profiles.for_window(&window)?;
-    build_overview_conn(&conn, &active)
-}
-
-#[tauri::command]
-pub fn record_activity(
-    db: State<Database>,
-    window: WebviewWindow,
-    profiles: State<'_, WindowProfiles>,
+pub fn record_activity_core(
+    conn: &Connection,
+    active: &ActiveProfile,
     seconds: i64,
 ) -> Result<KarmaOverview, String> {
-    let active = profiles.for_window(&window)?;
     if active.is_admin || seconds <= 0 {
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        return build_overview_conn(&conn, &active);
+        return build_overview_conn(conn, active);
     }
 
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let profile_id = active.id.clone();
     let day = today_utc();
-    ensure_karma_state(&conn, &profile_id)?;
-    get_or_create_daily(&conn, &profile_id, &day)?;
+    ensure_karma_state(conn, &profile_id)?;
+    get_or_create_daily(conn, &profile_id, &day)?;
 
     conn.execute(
         "UPDATE karma_daily SET active_seconds = active_seconds + ?1 WHERE profile_id = ?2 AND day = ?3",
@@ -490,9 +471,9 @@ pub fn record_activity(
     .map_err(|e| e.to_string())?;
 
     let (active_seconds, review_count, add_count, qualified, _, _) =
-        get_or_create_daily(&conn, &profile_id, &day)?;
+        get_or_create_daily(conn, &profile_id, &day)?;
     let _ = maybe_daily_qualify_bonus(
-        &conn,
+        conn,
         &profile_id,
         &day,
         qualified,
@@ -501,8 +482,76 @@ pub fn record_activity(
         add_count,
     )?;
 
-    build_overview_conn(&conn, &active)
+    build_overview_conn(conn, active)
 }
+
+#[cfg(not(target_arch = "wasm32"))]
+mod native {
+    use super::*;
+    use crate::commands::window_profiles::WindowProfiles;
+    use crate::db::Database;
+    use tauri::{State, WebviewWindow};
+
+    #[tauri::command]
+    pub fn get_karma_overview(
+        db: State<Database>,
+        window: WebviewWindow,
+        profiles: State<'_, WindowProfiles>,
+    ) -> Result<KarmaOverview, String> {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let active = profiles.for_window(&window)?;
+        build_overview_conn(&conn, &active)
+    }
+
+    #[tauri::command]
+    pub fn record_activity(
+        db: State<Database>,
+        window: WebviewWindow,
+        profiles: State<'_, WindowProfiles>,
+        seconds: i64,
+    ) -> Result<KarmaOverview, String> {
+        let active = profiles.for_window(&window)?;
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        record_activity_core(&conn, &active, seconds)
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub use native::*;
+
+#[cfg(target_arch = "wasm32")]
+mod wasm {
+    use super::*;
+    use crate::commands::profiles::load_active_profile_from_db;
+    use crate::db::wasm_singleton::with_db;
+    use wasm_bindgen::prelude::*;
+
+    #[wasm_bindgen(js_name = getKarmaOverview)]
+    pub fn get_karma_overview() -> Result<String, JsValue> {
+        with_db(|db| {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            let active = load_active_profile_from_db(&conn)?;
+            let overview = build_overview_conn(&conn, &active)?;
+            serde_json::to_string(&overview).map_err(|e| e.to_string())
+        })
+        .map_err(|e| JsValue::from_str(&e))
+    }
+
+    #[wasm_bindgen(js_name = recordActivity)]
+    pub fn record_activity(seconds: f64) -> Result<String, JsValue> {
+        with_db(|db| {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            let active = load_active_profile_from_db(&conn)?;
+            let overview = record_activity_core(&conn, &active, seconds as i64)?;
+            serde_json::to_string(&overview).map_err(|e| e.to_string())
+        })
+        .map_err(|e| JsValue::from_str(&e))
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+#[allow(unused_imports)] // #[wasm_bindgen] fns here are called from JS, not Rust
+pub use wasm::*;
 
 #[cfg(test)]
 mod tests {

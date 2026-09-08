@@ -1,9 +1,7 @@
 use crate::commands::karma::{self, KarmaEarnEvent};
-use crate::commands::window_profiles::WindowProfiles;
+use crate::commands::profiles::ActiveProfile;
 use crate::db::deck_tree::deck_scope_ids;
-use crate::db::Database;
 use serde::{Deserialize, Serialize};
-use tauri::{State, WebviewWindow};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ReviewCard {
@@ -113,20 +111,69 @@ pub struct IntervalPreview {
     pub easy: String,
 }
 
-#[tauri::command]
-pub fn get_interval_preview(
-    db: State<Database>,
-    window: WebviewWindow,
-    profiles: State<'_, WindowProfiles>,
-    card_id: String,
-) -> Result<IntervalPreview, String> {
-    let active = profiles.for_window(&window)?;
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+fn end_of_today(now: i64) -> i64 {
+    let day_start = now - (now % 86400);
+    day_start + 86400
+}
 
+#[derive(Debug, Serialize)]
+pub struct BuriedCard {
+    pub card_id: String,
+    pub note_id: String,
+    pub deck_id: String,
+    pub deck_name: String,
+    pub front_html: String,
+    pub fields: serde_json::Value,
+    pub state: String,
+    pub buried_until: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ReviewLogSnapshot {
+    pub id: String,
+    pub reviewed_at: i64,
+    pub rating: i32,
+    pub elapsed_ms: i64,
+    pub scheduled_days: f64,
+    pub state_before: String,
+    pub state_after: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct DeletedCardSnapshot {
+    pub id: String,
+    pub note_id: String,
+    pub template_ordinal: i64,
+    pub state: String,
+    pub difficulty: f64,
+    pub stability: f64,
+    pub due_at: i64,
+    pub last_review_at: Option<i64>,
+    pub reps: i64,
+    pub lapses: i64,
+    pub buried_until: Option<i64>,
+    pub triple_ids: Vec<String>,
+    pub review_logs: Vec<ReviewLogSnapshot>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct UndoReviewResult {
+    pub karma: KarmaEarnEvent,
+}
+
+// ---------------------------------------------------------------------------
+// Core: pure business logic, no Tauri or wasm-bindgen types.
+// ---------------------------------------------------------------------------
+
+pub fn get_interval_preview_core(
+    conn: &rusqlite::Connection,
+    profile_id: &str,
+    card_id: &str,
+) -> Result<IntervalPreview, String> {
     let (state, difficulty, stability): (String, f64, f64) = conn
         .query_row(
             "SELECT state, difficulty, stability FROM card_progress WHERE profile_id = ?1 AND card_id = ?2",
-            (&active.id, &card_id),
+            (profile_id, card_id),
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .map_err(|e| e.to_string())?;
@@ -139,28 +186,23 @@ pub fn get_interval_preview(
     })
 }
 
-#[tauri::command]
-pub fn get_review_queue(
-    db: State<Database>,
-    window: WebviewWindow,
-    profiles: State<'_, WindowProfiles>,
-    deck_id: String,
+pub fn get_review_queue_core(
+    conn: &rusqlite::Connection,
+    profile_id: &str,
+    deck_id: &str,
 ) -> Result<Vec<ReviewCard>, String> {
-    let active = profiles.for_window(&window)?;
-    let profile_id = active.id.clone();
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let now = chrono::Utc::now().timestamp();
 
     let deck = conn
         .query_row(
             "SELECT new_per_day, max_reviews FROM decks WHERE id = ?1",
-            [&deck_id],
+            [deck_id],
             |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
         )
         .map_err(|e| e.to_string())?;
 
     let (new_limit, review_limit) = deck;
-    let scope = deck_scope_ids(&conn, &deck_id).map_err(|e| e.to_string())?;
+    let scope = deck_scope_ids(conn, deck_id).map_err(|e| e.to_string())?;
     if scope.is_empty() {
         return Ok(Vec::new());
     }
@@ -204,7 +246,7 @@ pub fn get_review_queue(
          LIMIT ?"
     );
 
-    let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(profile_id)];
+    let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(profile_id.to_string())];
     params.extend(
         scope
             .iter()
@@ -240,17 +282,12 @@ pub fn get_review_queue(
     Ok(cards)
 }
 
-#[tauri::command]
-pub fn answer_card(
-    db: State<Database>,
-    window: WebviewWindow,
-    profiles: State<'_, WindowProfiles>,
+pub fn answer_card_core(
+    conn: &rusqlite::Connection,
+    active: &ActiveProfile,
     input: AnswerInput,
 ) -> Result<AnswerResult, String> {
-    let active = profiles.for_window(&window)?;
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let now = chrono::Utc::now().timestamp();
-
     let profile_id = active.id.clone();
 
     let (state, difficulty, stability): (String, f64, f64) = conn
@@ -311,7 +348,7 @@ pub fn answer_card(
     )
     .map_err(|e| e.to_string())?;
 
-    let karma = karma::earn_review_conn(&conn, &active, input.elapsed_ms)?;
+    let karma = karma::earn_review_conn(conn, active, input.elapsed_ms)?;
 
     Ok(AnswerResult {
         card_id: input.card_id,
@@ -324,27 +361,17 @@ pub fn answer_card(
     })
 }
 
-#[derive(Debug, Serialize)]
-pub struct UndoReviewResult {
-    pub karma: KarmaEarnEvent,
-}
-
-#[tauri::command]
-pub fn undo_review(
-    db: State<Database>,
-    window: WebviewWindow,
-    profiles: State<'_, WindowProfiles>,
-    review_log_id: String,
+pub fn undo_review_core(
+    conn: &rusqlite::Connection,
+    active: &ActiveProfile,
+    review_log_id: &str,
 ) -> Result<UndoReviewResult, String> {
-    let active = profiles.for_window(&window)?;
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-
     let profile_id = active.id.clone();
 
     let (card_id, rating, state_before): (String, i32, String) = conn
         .query_row(
             "SELECT card_id, rating, state_before FROM review_log WHERE id = ?1 AND profile_id = ?2",
-            (&review_log_id, &profile_id),
+            (review_log_id, &profile_id),
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .map_err(|e| e.to_string())?;
@@ -352,7 +379,7 @@ pub fn undo_review(
     let prev_log: Option<(f64, f64)> = conn
         .query_row(
             "SELECT scheduled_days, scheduled_days FROM review_log WHERE card_id = ?1 AND profile_id = ?2 AND id != ?3 ORDER BY reviewed_at DESC LIMIT 1",
-            (&card_id, &profile_id, &review_log_id),
+            (&card_id, &profile_id, review_log_id),
             |row| Ok((row.get::<_, f64>(0)?, row.get::<_, f64>(1)?)),
         )
         .ok();
@@ -374,27 +401,22 @@ pub fn undo_review(
     )
     .map_err(|e| e.to_string())?;
 
-    conn.execute("DELETE FROM review_log WHERE id = ?1", [&review_log_id])
+    conn.execute("DELETE FROM review_log WHERE id = ?1", [review_log_id])
         .map_err(|e| e.to_string())?;
 
-    let karma = karma::revert_review_conn(&conn, &active)?;
+    let karma = karma::revert_review_conn(conn, active)?;
 
     Ok(UndoReviewResult { karma })
 }
 
-#[tauri::command]
-pub fn get_review_stats(
-    db: State<Database>,
-    window: WebviewWindow,
-    profiles: State<'_, WindowProfiles>,
-    deck_id: String,
+pub fn get_review_stats_core(
+    conn: &rusqlite::Connection,
+    profile_id: &str,
+    deck_id: &str,
 ) -> Result<ReviewStats, String> {
-    let active = profiles.for_window(&window)?;
-    let profile_id = active.id.clone();
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let now = chrono::Utc::now().timestamp();
     let today_start = now - (now % 86400);
-    let scope = deck_scope_ids(&conn, &deck_id).map_err(|e| e.to_string())?;
+    let scope = deck_scope_ids(conn, deck_id).map_err(|e| e.to_string())?;
     if scope.is_empty() {
         return Ok(ReviewStats {
             reviewed_today: 0,
@@ -417,7 +439,7 @@ pub fn get_review_stats(
 
     let mut params: Vec<Box<dyn rusqlite::types::ToSql>> =
         scope.iter().map(|id| Box::new(id.clone()) as Box<dyn rusqlite::types::ToSql>).collect();
-    params.push(Box::new(profile_id));
+    params.push(Box::new(profile_id.to_string()));
     params.push(Box::new(today_start));
 
     let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
@@ -453,39 +475,18 @@ pub fn get_review_stats(
     Ok(stats)
 }
 
-fn end_of_today(now: i64) -> i64 {
-    let day_start = now - (now % 86400);
-    day_start + 86400
-}
-
-#[derive(Debug, Serialize)]
-pub struct BuriedCard {
-    pub card_id: String,
-    pub note_id: String,
-    pub deck_id: String,
-    pub deck_name: String,
-    pub front_html: String,
-    pub fields: serde_json::Value,
-    pub state: String,
-    pub buried_until: i64,
-}
-
-#[tauri::command]
-pub fn bury_card(
-    db: State<Database>,
-    window: WebviewWindow,
-    profiles: State<'_, WindowProfiles>,
-    card_id: String,
+pub fn bury_card_core(
+    conn: &rusqlite::Connection,
+    profile_id: &str,
+    card_id: &str,
 ) -> Result<i64, String> {
-    let active = profiles.for_window(&window)?;
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let now = chrono::Utc::now().timestamp();
     let buried_until = end_of_today(now);
 
     let updated = conn
         .execute(
             "UPDATE card_progress SET buried_until = ?1 WHERE profile_id = ?2 AND card_id = ?3",
-            (buried_until, &active.id, &card_id),
+            (buried_until, profile_id, card_id),
         )
         .map_err(|e| e.to_string())?;
 
@@ -496,35 +497,26 @@ pub fn bury_card(
     Ok(buried_until)
 }
 
-#[tauri::command]
-pub fn unbury_card(
-    db: State<Database>,
-    window: WebviewWindow,
-    profiles: State<'_, WindowProfiles>,
-    card_id: String,
+pub fn unbury_card_core(
+    conn: &rusqlite::Connection,
+    profile_id: &str,
+    card_id: &str,
 ) -> Result<(), String> {
-    let active = profiles.for_window(&window)?;
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
     conn.execute(
         "UPDATE card_progress SET buried_until = NULL WHERE profile_id = ?1 AND card_id = ?2",
-        (&active.id, &card_id),
+        (profile_id, card_id),
     )
     .map_err(|e| e.to_string())?;
     Ok(())
 }
 
-#[tauri::command]
-pub fn get_buried_cards(
-    db: State<Database>,
-    window: WebviewWindow,
-    profiles: State<'_, WindowProfiles>,
+pub fn get_buried_cards_core(
+    conn: &rusqlite::Connection,
+    profile_id: &str,
     query: Option<String>,
     deck_id: Option<String>,
     limit: Option<i64>,
 ) -> Result<Vec<BuriedCard>, String> {
-    let active = profiles.for_window(&window)?;
-    let profile_id = active.id.clone();
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let now = chrono::Utc::now().timestamp();
     let fetch_limit = limit.unwrap_or(100).min(500);
     let search = query.unwrap_or_default().trim().to_lowercase();
@@ -603,51 +595,18 @@ pub fn get_buried_cards(
     Ok(cards)
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct ReviewLogSnapshot {
-    pub id: String,
-    pub reviewed_at: i64,
-    pub rating: i32,
-    pub elapsed_ms: i64,
-    pub scheduled_days: f64,
-    pub state_before: String,
-    pub state_after: String,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct DeletedCardSnapshot {
-    pub id: String,
-    pub note_id: String,
-    pub template_ordinal: i64,
-    pub state: String,
-    pub difficulty: f64,
-    pub stability: f64,
-    pub due_at: i64,
-    pub last_review_at: Option<i64>,
-    pub reps: i64,
-    pub lapses: i64,
-    pub buried_until: Option<i64>,
-    pub triple_ids: Vec<String>,
-    pub review_logs: Vec<ReviewLogSnapshot>,
-}
-
-#[tauri::command]
-pub fn delete_card(
-    db: State<Database>,
-    window: WebviewWindow,
-    profiles: State<'_, WindowProfiles>,
-    card_id: String,
+pub fn delete_card_core(
+    conn: &rusqlite::Connection,
+    profile_id: &str,
+    card_id: &str,
 ) -> Result<DeletedCardSnapshot, String> {
-    let active = profiles.for_window(&window)?;
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-
     let mut snapshot: DeletedCardSnapshot = conn
         .query_row(
             "SELECT c.id, c.note_id, c.template_ordinal, cp.state, cp.difficulty, cp.stability, cp.due_at, cp.last_review_at, cp.reps, cp.lapses, cp.buried_until
              FROM cards c
              JOIN card_progress cp ON cp.card_id = c.id AND cp.profile_id = ?2
              WHERE c.id = ?1",
-            (&card_id, &active.id),
+            (card_id, profile_id),
             |row| {
                 Ok(DeletedCardSnapshot {
                     id: row.get(0)?,
@@ -671,7 +630,7 @@ pub fn delete_card(
     snapshot.triple_ids = conn
         .prepare("SELECT triple_id FROM card_triples WHERE card_id = ?1")
         .map_err(|e| e.to_string())?
-        .query_map([&card_id], |row| row.get(0))
+        .query_map([card_id], |row| row.get(0))
         .map_err(|e| e.to_string())?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
@@ -682,7 +641,7 @@ pub fn delete_card(
              FROM review_log WHERE card_id = ?1 ORDER BY reviewed_at",
         )
         .map_err(|e| e.to_string())?
-        .query_map([&card_id], |row| {
+        .query_map([card_id], |row| {
             Ok(ReviewLogSnapshot {
                 id: row.get(0)?,
                 reviewed_at: row.get(1)?,
@@ -697,16 +656,16 @@ pub fn delete_card(
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
 
-    conn.execute("DELETE FROM cards WHERE id = ?1", [&card_id])
+    conn.execute("DELETE FROM cards WHERE id = ?1", [card_id])
         .map_err(|e| e.to_string())?;
 
     Ok(snapshot)
 }
 
-#[tauri::command]
-pub fn restore_card(db: State<Database>, snapshot: DeletedCardSnapshot) -> Result<(), String> {
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-
+pub fn restore_card_core(
+    conn: &rusqlite::Connection,
+    snapshot: DeletedCardSnapshot,
+) -> Result<(), String> {
     let exists: bool = conn
         .query_row(
             "SELECT COUNT(*) > 0 FROM cards WHERE id = ?1",
@@ -794,3 +753,271 @@ pub fn restore_card(db: State<Database>, snapshot: DeletedCardSnapshot) -> Resul
 
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Native (Tauri) command wrappers.
+// ---------------------------------------------------------------------------
+
+#[cfg(not(target_arch = "wasm32"))]
+mod native {
+    use super::*;
+    use crate::commands::window_profiles::WindowProfiles;
+    use crate::db::Database;
+    use tauri::{State, WebviewWindow};
+
+    #[tauri::command]
+    pub fn get_interval_preview(
+        db: State<Database>,
+        window: WebviewWindow,
+        profiles: State<'_, WindowProfiles>,
+        card_id: String,
+    ) -> Result<IntervalPreview, String> {
+        let active = profiles.for_window(&window)?;
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        get_interval_preview_core(&conn, &active.id, &card_id)
+    }
+
+    #[tauri::command]
+    pub fn get_review_queue(
+        db: State<Database>,
+        window: WebviewWindow,
+        profiles: State<'_, WindowProfiles>,
+        deck_id: String,
+    ) -> Result<Vec<ReviewCard>, String> {
+        let active = profiles.for_window(&window)?;
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        get_review_queue_core(&conn, &active.id, &deck_id)
+    }
+
+    #[tauri::command]
+    pub fn answer_card(
+        db: State<Database>,
+        window: WebviewWindow,
+        profiles: State<'_, WindowProfiles>,
+        input: AnswerInput,
+    ) -> Result<AnswerResult, String> {
+        let active = profiles.for_window(&window)?;
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        answer_card_core(&conn, &active, input)
+    }
+
+    #[tauri::command]
+    pub fn undo_review(
+        db: State<Database>,
+        window: WebviewWindow,
+        profiles: State<'_, WindowProfiles>,
+        review_log_id: String,
+    ) -> Result<UndoReviewResult, String> {
+        let active = profiles.for_window(&window)?;
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        undo_review_core(&conn, &active, &review_log_id)
+    }
+
+    #[tauri::command]
+    pub fn get_review_stats(
+        db: State<Database>,
+        window: WebviewWindow,
+        profiles: State<'_, WindowProfiles>,
+        deck_id: String,
+    ) -> Result<ReviewStats, String> {
+        let active = profiles.for_window(&window)?;
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        get_review_stats_core(&conn, &active.id, &deck_id)
+    }
+
+    #[tauri::command]
+    pub fn bury_card(
+        db: State<Database>,
+        window: WebviewWindow,
+        profiles: State<'_, WindowProfiles>,
+        card_id: String,
+    ) -> Result<i64, String> {
+        let active = profiles.for_window(&window)?;
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        bury_card_core(&conn, &active.id, &card_id)
+    }
+
+    #[tauri::command]
+    pub fn unbury_card(
+        db: State<Database>,
+        window: WebviewWindow,
+        profiles: State<'_, WindowProfiles>,
+        card_id: String,
+    ) -> Result<(), String> {
+        let active = profiles.for_window(&window)?;
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        unbury_card_core(&conn, &active.id, &card_id)
+    }
+
+    #[tauri::command]
+    pub fn get_buried_cards(
+        db: State<Database>,
+        window: WebviewWindow,
+        profiles: State<'_, WindowProfiles>,
+        query: Option<String>,
+        deck_id: Option<String>,
+        limit: Option<i64>,
+    ) -> Result<Vec<BuriedCard>, String> {
+        let active = profiles.for_window(&window)?;
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        get_buried_cards_core(&conn, &active.id, query, deck_id, limit)
+    }
+
+    #[tauri::command]
+    pub fn delete_card(
+        db: State<Database>,
+        window: WebviewWindow,
+        profiles: State<'_, WindowProfiles>,
+        card_id: String,
+    ) -> Result<DeletedCardSnapshot, String> {
+        let active = profiles.for_window(&window)?;
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        delete_card_core(&conn, &active.id, &card_id)
+    }
+
+    #[tauri::command]
+    pub fn restore_card(db: State<Database>, snapshot: DeletedCardSnapshot) -> Result<(), String> {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        restore_card_core(&conn, snapshot)
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub use native::*;
+
+// ---------------------------------------------------------------------------
+// wasm-bindgen exports: same JSON-in/JSON-out shape as the rest of the core.
+// ---------------------------------------------------------------------------
+
+#[cfg(target_arch = "wasm32")]
+mod wasm {
+    use super::*;
+    use crate::commands::profiles::load_active_profile_from_db;
+    use crate::db::wasm_singleton::with_db;
+    use wasm_bindgen::prelude::*;
+
+    #[wasm_bindgen(js_name = getIntervalPreview)]
+    pub fn get_interval_preview(card_id: String) -> Result<String, JsValue> {
+        with_db(|db| {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            let active = load_active_profile_from_db(&conn)?;
+            let preview = get_interval_preview_core(&conn, &active.id, &card_id)?;
+            serde_json::to_string(&preview).map_err(|e| e.to_string())
+        })
+        .map_err(|e| JsValue::from_str(&e))
+    }
+
+    #[wasm_bindgen(js_name = getReviewQueue)]
+    pub fn get_review_queue(deck_id: String) -> Result<String, JsValue> {
+        with_db(|db| {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            let active = load_active_profile_from_db(&conn)?;
+            let cards = get_review_queue_core(&conn, &active.id, &deck_id)?;
+            serde_json::to_string(&cards).map_err(|e| e.to_string())
+        })
+        .map_err(|e| JsValue::from_str(&e))
+    }
+
+    #[wasm_bindgen(js_name = answerCard)]
+    pub fn answer_card(input_json: String) -> Result<String, JsValue> {
+        let input: AnswerInput =
+            serde_json::from_str(&input_json).map_err(|e| JsValue::from_str(&e.to_string()))?;
+        with_db(|db| {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            let active = load_active_profile_from_db(&conn)?;
+            let result = answer_card_core(&conn, &active, input)?;
+            serde_json::to_string(&result).map_err(|e| e.to_string())
+        })
+        .map_err(|e| JsValue::from_str(&e))
+    }
+
+    #[wasm_bindgen(js_name = undoReview)]
+    pub fn undo_review(review_log_id: String) -> Result<String, JsValue> {
+        with_db(|db| {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            let active = load_active_profile_from_db(&conn)?;
+            let result = undo_review_core(&conn, &active, &review_log_id)?;
+            serde_json::to_string(&result).map_err(|e| e.to_string())
+        })
+        .map_err(|e| JsValue::from_str(&e))
+    }
+
+    #[wasm_bindgen(js_name = getReviewStats)]
+    pub fn get_review_stats(deck_id: String) -> Result<String, JsValue> {
+        with_db(|db| {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            let active = load_active_profile_from_db(&conn)?;
+            let stats = get_review_stats_core(&conn, &active.id, &deck_id)?;
+            serde_json::to_string(&stats).map_err(|e| e.to_string())
+        })
+        .map_err(|e| JsValue::from_str(&e))
+    }
+
+    #[wasm_bindgen(js_name = buryCard)]
+    pub fn bury_card(card_id: String) -> Result<f64, JsValue> {
+        with_db(|db| {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            let active = load_active_profile_from_db(&conn)?;
+            bury_card_core(&conn, &active.id, &card_id)
+        })
+        .map(|v| v as f64)
+        .map_err(|e| JsValue::from_str(&e))
+    }
+
+    #[wasm_bindgen(js_name = unburyCard)]
+    pub fn unbury_card(card_id: String) -> Result<(), JsValue> {
+        with_db(|db| {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            let active = load_active_profile_from_db(&conn)?;
+            unbury_card_core(&conn, &active.id, &card_id)
+        })
+        .map_err(|e| JsValue::from_str(&e))
+    }
+
+    #[wasm_bindgen(js_name = getBuriedCards)]
+    pub fn get_buried_cards(
+        query: Option<String>,
+        deck_id: Option<String>,
+        limit: Option<f64>,
+    ) -> Result<String, JsValue> {
+        with_db(|db| {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            let active = load_active_profile_from_db(&conn)?;
+            let cards = get_buried_cards_core(
+                &conn,
+                &active.id,
+                query,
+                deck_id,
+                limit.map(|l| l as i64),
+            )?;
+            serde_json::to_string(&cards).map_err(|e| e.to_string())
+        })
+        .map_err(|e| JsValue::from_str(&e))
+    }
+
+    #[wasm_bindgen(js_name = deleteCard)]
+    pub fn delete_card(card_id: String) -> Result<String, JsValue> {
+        with_db(|db| {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            let active = load_active_profile_from_db(&conn)?;
+            let snapshot = delete_card_core(&conn, &active.id, &card_id)?;
+            serde_json::to_string(&snapshot).map_err(|e| e.to_string())
+        })
+        .map_err(|e| JsValue::from_str(&e))
+    }
+
+    #[wasm_bindgen(js_name = restoreCard)]
+    pub fn restore_card(snapshot_json: String) -> Result<(), JsValue> {
+        let snapshot: DeletedCardSnapshot = serde_json::from_str(&snapshot_json)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        with_db(|db| {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            restore_card_core(&conn, snapshot)
+        })
+        .map_err(|e| JsValue::from_str(&e))
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+#[allow(unused_imports)] // #[wasm_bindgen] fns here are called from JS, not Rust
+pub use wasm::*;

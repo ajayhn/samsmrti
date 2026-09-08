@@ -8,7 +8,13 @@
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "build:wasm-core": "wasm-pack build src-tauri --target web --out-dir ../src/wasm-core/pkg --dev",
+    "build:wasm-core:release": "wasm-pack build src-tauri --target web --out-dir ../src/wasm-core/pkg --release",
+    "dev:web": "npm run build:wasm-core && vite --config vite.web.config.ts",
+    "build:web": "npm run build:wasm-core:release && tsc -b && vite build --config vite.web.config.ts",
+    "preview:web": "vite preview --config vite.web.config.ts --port 4244",
+    "deploy:web": "bash scripts/deploy-web.sh"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.3.0",
@@ -40,6 +46,7 @@
     "globals": "^17.6.0",
     "typescript": "~6.0.2",
     "typescript-eslint": "^8.59.2",
-    "vite": "^8.0.12"
+    "vite": "^8.0.12",
+    "vite-plugin-pwa": "^1.3.0"
   }
 }

@@ -1,10 +1,7 @@
-use crate::commands::window_profiles::WindowProfiles;
 use crate::db::deck_tree::deck_scope_ids;
-use crate::db::Database;
 use rusqlite::Connection;
 use serde::Serialize;
 use std::collections::HashMap;
-use tauri::{State, WebviewWindow};
 
 #[derive(Debug, Serialize)]
 pub struct SearchResult {
@@ -139,21 +136,8 @@ fn attach_tags_to_results(
     Ok(())
 }
 
-#[tauri::command]
-pub fn rebuild_search_index(db: State<Database>) -> Result<(), String> {
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    rebuild_search_index_conn(&conn)
-}
-
-#[tauri::command]
-pub fn ensure_search_index(db: State<Database>) -> Result<bool, String> {
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    ensure_search_index_conn(&conn)
-}
-
-#[tauri::command]
-pub fn search_notes(
-    db: State<Database>,
+pub fn search_notes_core(
+    conn: &Connection,
     query: String,
     deck_id: Option<String>,
     tag: Option<String>,
@@ -161,7 +145,6 @@ pub fn search_notes(
     limit: Option<i64>,
     offset: Option<i64>,
 ) -> Result<Vec<SearchResult>, String> {
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let lim = limit.unwrap_or(50);
     let off = offset.unwrap_or(0);
 
@@ -263,10 +246,7 @@ pub fn search_notes(
     Ok(results_with_tags)
 }
 
-#[tauri::command]
-pub fn get_all_tags(db: State<Database>) -> Result<Vec<(String, String, i64)>, String> {
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-
+pub fn get_all_tags_core(conn: &Connection) -> Result<Vec<(String, String, i64)>, String> {
     let mut stmt = conn
         .prepare(
             "SELECT t.id, t.name, COUNT(nt.note_id) as usage_count
@@ -308,15 +288,10 @@ pub struct DailyReview {
     pub easy: i64,
 }
 
-#[tauri::command]
-pub fn get_stats_overview(
-    db: State<Database>,
-    window: WebviewWindow,
-    profiles: State<'_, WindowProfiles>,
+pub fn get_stats_overview_core(
+    conn: &Connection,
+    profile_id: &str,
 ) -> Result<StatsOverview, String> {
-    let active = profiles.for_window(&window)?;
-    let profile_id = active.id.clone();
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let now = chrono::Utc::now().timestamp();
     let today_start = now - (now % 86400);
 
@@ -327,7 +302,7 @@ pub fn get_stats_overview(
     let new_cards: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM card_progress WHERE profile_id = ?1 AND state = 'new'",
-            [&profile_id],
+            [profile_id],
             |row| row.get(0),
         )
         .unwrap_or(0);
@@ -335,7 +310,7 @@ pub fn get_stats_overview(
     let learning_cards: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM card_progress WHERE profile_id = ?1 AND state IN ('learning', 'relearning')",
-            [&profile_id],
+            [profile_id],
             |row| row.get(0),
         )
         .unwrap_or(0);
@@ -343,7 +318,7 @@ pub fn get_stats_overview(
     let review_cards: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM card_progress WHERE profile_id = ?1 AND state = 'review'",
-            [&profile_id],
+            [profile_id],
             |row| row.get(0),
         )
         .unwrap_or(0);
@@ -355,7 +330,7 @@ pub fn get_stats_overview(
     let total_reviews_today: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM review_log WHERE profile_id = ?1 AND reviewed_at >= ?2",
-            (&profile_id, today_start),
+            (profile_id, today_start),
             |row| row.get(0),
         )
         .unwrap_or(0);
@@ -376,7 +351,7 @@ pub fn get_stats_overview(
 
     let thirty_days_ago = now - (30 * 86400);
     let daily_reviews: Vec<DailyReview> = daily_stmt
-        .query_map((&profile_id, thirty_days_ago), |row| {
+        .query_map((profile_id, thirty_days_ago), |row| {
             Ok(DailyReview {
                 date: row.get(0)?,
                 count: row.get(1)?,
@@ -428,4 +403,143 @@ fn calculate_streak(daily: &[DailyReview]) -> i64 {
 
     streak
 }
+
+// ---------------------------------------------------------------------------
+// Native (Tauri) command wrappers.
+// ---------------------------------------------------------------------------
+
+#[cfg(not(target_arch = "wasm32"))]
+mod native {
+    use super::*;
+    use crate::commands::window_profiles::WindowProfiles;
+    use crate::db::Database;
+    use tauri::{State, WebviewWindow};
+
+    #[tauri::command]
+    pub fn rebuild_search_index(db: State<Database>) -> Result<(), String> {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        rebuild_search_index_conn(&conn)
+    }
+
+    #[tauri::command]
+    pub fn ensure_search_index(db: State<Database>) -> Result<bool, String> {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        ensure_search_index_conn(&conn)
+    }
+
+    #[tauri::command]
+    pub fn search_notes(
+        db: State<Database>,
+        query: String,
+        deck_id: Option<String>,
+        tag: Option<String>,
+        note_type_id: Option<String>,
+        limit: Option<i64>,
+        offset: Option<i64>,
+    ) -> Result<Vec<SearchResult>, String> {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        search_notes_core(&conn, query, deck_id, tag, note_type_id, limit, offset)
+    }
+
+    #[tauri::command]
+    pub fn get_all_tags(db: State<Database>) -> Result<Vec<(String, String, i64)>, String> {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        get_all_tags_core(&conn)
+    }
+
+    #[tauri::command]
+    pub fn get_stats_overview(
+        db: State<Database>,
+        window: WebviewWindow,
+        profiles: State<'_, WindowProfiles>,
+    ) -> Result<StatsOverview, String> {
+        let active = profiles.for_window(&window)?;
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        get_stats_overview_core(&conn, &active.id)
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub use native::*;
+
+// ---------------------------------------------------------------------------
+// wasm-bindgen exports.
+// ---------------------------------------------------------------------------
+
+#[cfg(target_arch = "wasm32")]
+mod wasm {
+    use super::*;
+    use crate::commands::profiles::load_active_profile_from_db;
+    use crate::db::wasm_singleton::with_db;
+    use wasm_bindgen::prelude::*;
+
+    #[wasm_bindgen(js_name = rebuildSearchIndex)]
+    pub fn rebuild_search_index() -> Result<(), JsValue> {
+        with_db(|db| {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            rebuild_search_index_conn(&conn)
+        })
+        .map_err(|e| JsValue::from_str(&e))
+    }
+
+    #[wasm_bindgen(js_name = ensureSearchIndex)]
+    pub fn ensure_search_index() -> Result<bool, JsValue> {
+        with_db(|db| {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            ensure_search_index_conn(&conn)
+        })
+        .map_err(|e| JsValue::from_str(&e))
+    }
+
+    #[wasm_bindgen(js_name = searchNotes)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn search_notes(
+        query: String,
+        deck_id: Option<String>,
+        tag: Option<String>,
+        note_type_id: Option<String>,
+        limit: Option<f64>,
+        offset: Option<f64>,
+    ) -> Result<String, JsValue> {
+        with_db(|db| {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            let results = search_notes_core(
+                &conn,
+                query,
+                deck_id,
+                tag,
+                note_type_id,
+                limit.map(|l| l as i64),
+                offset.map(|o| o as i64),
+            )?;
+            serde_json::to_string(&results).map_err(|e| e.to_string())
+        })
+        .map_err(|e| JsValue::from_str(&e))
+    }
+
+    #[wasm_bindgen(js_name = getAllTags)]
+    pub fn get_all_tags() -> Result<String, JsValue> {
+        with_db(|db| {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            let tags = get_all_tags_core(&conn)?;
+            serde_json::to_string(&tags).map_err(|e| e.to_string())
+        })
+        .map_err(|e| JsValue::from_str(&e))
+    }
+
+    #[wasm_bindgen(js_name = getStatsOverview)]
+    pub fn get_stats_overview() -> Result<String, JsValue> {
+        with_db(|db| {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            let active = load_active_profile_from_db(&conn)?;
+            let overview = get_stats_overview_core(&conn, &active.id)?;
+            serde_json::to_string(&overview).map_err(|e| e.to_string())
+        })
+        .map_err(|e| JsValue::from_str(&e))
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+#[allow(unused_imports)] // #[wasm_bindgen] fns here are called from JS, not Rust
+pub use wasm::*;
 

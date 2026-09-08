@@ -1,0 +1,43 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "wasm-spike",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": [
+        "-m",
+        "http.server",
+        "8934",
+        "--directory",
+        "/private/tmp/claude-501/-Users-hampapurajay-samsmrti/e58160c5-86e1-43fa-b95c-ef3946cc4d46/scratchpad/wasm-spike"
+      ],
+      "port": 8934
+    },
+    {
+      "name": "samsmrti-wasm-check",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": [
+        "-m",
+        "http.server",
+        "8935",
+        "--directory",
+        "/private/tmp/claude-501/-Users-hampapurajay-samsmrti/e58160c5-86e1-43fa-b95c-ef3946cc4d46/scratchpad/samsmrti-wasm-check"
+      ],
+      "port": 8935
+    },
+    {
+      "name": "samsmrti-web",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["vite", "--config", "vite.web.config.ts", "--port", "4243"],
+      "port": 4243,
+      "url": "http://localhost:4243/"
+    },
+    {
+      "name": "samsmrti-web-preview",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["vite", "preview", "--config", "vite.web.config.ts", "--port", "4244"],
+      "port": 4244,
+      "url": "http://localhost:4244/"
+    }
+  ]
+}

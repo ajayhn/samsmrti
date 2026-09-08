@@ -211,6 +211,71 @@ npm run tauri dev
 
 A plain quit/reopen without recompiling will keep the old dock icon. For a packaged `.app`, run `npm run tauri build` and open the bundle under `src-tauri/target/release/bundle/`.
 
+## Web/PWA build (review-only, phone-friendly)
+
+Alongside the desktop app, `index.web.html` builds a review-only PWA: browse
+decks, study, track karma, and manually import/export decks as JSON. It runs
+the same Rust core compiled to `wasm32-unknown-unknown`, hosted in a
+dedicated Web Worker for OPFS-backed persistent storage (no server).
+
+Requires a wasm32-capable C toolchain — Apple's system `clang` lacks the
+wasm32 backend, so install Homebrew's:
+
+```bash
+brew install llvm
+export CC_wasm32_unknown_unknown="/opt/homebrew/opt/llvm/bin/clang"
+export AR_wasm32_unknown_unknown="/opt/homebrew/opt/llvm/bin/llvm-ar"
+```
+
+```bash
+npm run dev:web       # local dev server (builds the wasm core first)
+npm run build:web     # production build -> dist-web/
+npm run preview:web   # serve the production build locally
+```
+
+### Deploying
+
+Live at **https://samsmrti-hosting.storage.googleapis.com/index.web.html**
+(GCS bucket `samsmrti-hosting`, project `still-toolbox-708`, public
+`objectViewer` access). Redeploy with:
+
+```bash
+npm run deploy:web
+```
+
+(`scripts/deploy-web.sh` — requires `gcloud auth login` once per machine.)
+
+**Use the bucket's virtual-hosted-style URL** (`BUCKET.storage.googleapis.com`),
+not the path-style one (`storage.googleapis.com/BUCKET/...`). The build's
+asset references are root-absolute (`/assets/foo.js`), so path-style access
+404s on them — only the virtual-hosted-style URL serves from a matching
+origin root.
+
+### Sharing a deck with other people
+
+Alongside file-based import/export, the Sync page's Import tab can fetch a
+deck straight from a URL, so decks can be shared without commingling deck
+data with the app's own code/repo:
+
+1. Export the deck (Sync -> Export) and host the resulting `.json` somewhere
+   public and separate from `samsmrti-hosting` -- a different bucket/object,
+   a Gist, another static host.
+2. **That host must send `Access-Control-Allow-Origin` allowing the app's
+   origin** (or `*`), since the browser fetches it cross-origin. A GCS
+   bucket needs this set explicitly, e.g.:
+   ```bash
+   echo '[{"origin": ["*"], "method": ["GET"], "responseHeader": ["Content-Type"]}]' > cors.json
+   gcloud storage buckets update gs://YOUR-DECKS-BUCKET --cors-file=cors.json
+   ```
+   Without it, the app's Fetch button fails with a clear "needs to allow
+   cross-origin requests (CORS)" error rather than importing partial data.
+3. Share either the raw link (recipient pastes it into Sync -> Import ->
+   "Paste a deck link") or a one-tap deep link that pre-fills and previews
+   automatically (still requires their own tap on "Import" to confirm):
+   ```text
+   https://samsmrti-hosting.storage.googleapis.com/index.web.html#/sync?import=<url-encoded-deck-json-link>
+   ```
+
 ## Related docs
 
 - **[QUICKSTART.md](./QUICKSTART.md)** — user-facing: profiles, export/import, features
